@@ -1,7 +1,7 @@
 //! Focus Desktop Simulator - A high-performance desktop simulator
 //!
 //! A Rust implementation of the Focus Desktop Simulator with an isometric 3D desk
-//! and interactive objects. Uses wgpu for GPU rendering.
+//! and interactive objects. Uses wgpu for GPU rendering and egui for UI.
 
 mod camera;
 mod config;
@@ -9,6 +9,7 @@ mod desk_object;
 mod mesh;
 mod physics;
 mod state;
+mod ui;
 
 use camera::Camera;
 use config::{hex_to_rgb, hex_to_rgba, CONFIG};
@@ -16,7 +17,9 @@ use desk_object::{DeskObject, ObjectType};
 use mesh::{generate_object_mesh, MeshData, Vertex};
 use physics::PhysicsEngine;
 use state::AppState;
+use ui::{render_left_sidebar, render_right_sidebar, UiAction, UiState};
 
+use egui_wgpu::ScreenDescriptor;
 use glam::{Mat4, Quat, Vec3};
 use log::info;
 use std::collections::HashMap;
@@ -24,11 +27,12 @@ use std::sync::Arc;
 use std::time::Instant;
 use wgpu::util::DeviceExt;
 use winit::{
+    application::ApplicationHandler,
     dpi::PhysicalSize,
-    event::{ElementState, Event, MouseButton, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
+    event::{ElementState, MouseButton, WindowEvent},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
-    window::{Window, WindowBuilder},
+    window::{Window, WindowAttributes, WindowId},
 };
 
 /// Camera uniform buffer data
@@ -134,6 +138,11 @@ struct App {
     last_frame_time: Instant,
     shift_pressed: bool,
     current_object_type_index: usize,
+    // Egui integration
+    egui_ctx: egui::Context,
+    egui_state: egui_winit::State,
+    egui_renderer: egui_wgpu::Renderer,
+    ui_state: UiState,
 }
 
 impl App {
@@ -167,6 +176,7 @@ impl App {
                     label: Some("Device"),
                     required_features: wgpu::Features::empty(),
                     required_limits: wgpu::Limits::default(),
+                    memory_hints: wgpu::MemoryHints::default(),
                 },
                 None,
             )
@@ -297,6 +307,7 @@ impl App {
                 alpha_to_coverage_enabled: false,
             },
             multiview: None,
+            cache: None,
         });
 
         // Create depth texture
@@ -313,6 +324,29 @@ impl App {
         let app_state = AppState::load();
         let mut physics = PhysicsEngine::new();
         physics.collision_radius_multiplier = app_state.collision_radius_multiplier;
+
+        // Initialize egui
+        let egui_ctx = egui::Context::default();
+
+        // Set up dark theme for egui
+        let mut style = egui::Style::default();
+        style.visuals = egui::Visuals::dark();
+        style.visuals.window_fill = egui::Color32::from_rgba_unmultiplied(26, 26, 46, 242);
+        style.visuals.panel_fill = egui::Color32::from_rgba_unmultiplied(26, 26, 46, 242);
+        egui_ctx.set_style(style);
+
+        let egui_state = egui_winit::State::new(
+            egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            &window,
+            Some(window.scale_factor() as f32),
+            None,
+            None,
+        );
+
+        let egui_renderer = egui_wgpu::Renderer::new(&device, config.format, None, 1, false);
+
+        let ui_state = UiState::new();
 
         let mut app = Self {
             window,
@@ -338,6 +372,10 @@ impl App {
             last_frame_time: Instant::now(),
             shift_pressed: false,
             current_object_type_index: 0,
+            egui_ctx,
+            egui_state,
+            egui_renderer,
+            ui_state,
         };
 
         // Create meshes for existing objects
@@ -462,7 +500,7 @@ impl App {
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[camera_uniform]));
     }
 
-    fn render(&self) -> Result<(), wgpu::SurfaceError> {
+    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
         let view = output
             .texture
@@ -553,13 +591,135 @@ impl App {
             }
         }
 
+        // Render egui UI
+        // Note: We need to prepare UI data before running egui to avoid borrow issues
+        let object_name = if let Some(id) = self.ui_state.selected_object_id {
+            self.state.get_object(id).map(|obj| obj.object_type.display_name().to_string())
+        } else {
+            None
+        };
+
+        let egui_input = self.egui_state.take_egui_input(&self.window);
+        let egui_ctx = self.egui_ctx.clone();
+
+        let mut ui_actions = Vec::new();
+        let egui_output = egui_ctx.run(egui_input, |ctx| {
+            // Render left sidebar (palette)
+            let left_actions = render_left_sidebar(ctx, &mut self.ui_state);
+            ui_actions.extend(left_actions);
+
+            // Render right sidebar (customization)
+            let right_actions = render_right_sidebar(ctx, &mut self.ui_state, object_name.as_deref());
+            ui_actions.extend(right_actions);
+        });
+
+        // Process UI actions after egui rendering
+        for action in ui_actions {
+            self.process_ui_action(action);
+        }
+
+        // Handle egui platform output
+        self.egui_state.handle_platform_output(&self.window, egui_output.platform_output);
+
+        // Render egui
+        let screen_descriptor = ScreenDescriptor {
+            size_in_pixels: [self.size.width, self.size.height],
+            pixels_per_point: self.window.scale_factor() as f32,
+        };
+
+        let tris = self.egui_ctx.tessellate(egui_output.shapes, egui_output.pixels_per_point);
+        for (id, image_delta) in &egui_output.textures_delta.set {
+            self.egui_renderer.update_texture(&self.device, &self.queue, *id, image_delta);
+        }
+        self.egui_renderer.update_buffers(&self.device, &self.queue, &mut encoder, &tris, &screen_descriptor);
+
+        {
+            let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Egui Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load, // Keep previous content
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            // Need to forget lifetime for egui-wgpu compatibility with wgpu 22
+            let mut render_pass = render_pass.forget_lifetime();
+            self.egui_renderer.render(&mut render_pass, &tris, &screen_descriptor);
+        }
+
+        // Free textures
+        for id in &egui_output.textures_delta.free {
+            self.egui_renderer.free_texture(id);
+        }
+
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
         Ok(())
     }
 
-    fn handle_event(&mut self, event: &WindowEvent) {
+    /// Process a UI action
+    fn process_ui_action(&mut self, action: UiAction) {
+        match action {
+            UiAction::AddObject(object_type) => {
+                self.add_object(object_type);
+                info!("Added {} from UI", object_type.display_name());
+            }
+            UiAction::DeleteObject(id) => {
+                self.state.remove_object(id);
+                self.object_meshes.remove(&id);
+                self.ui_state.close_customization();
+                info!("Deleted object {} from UI", id);
+            }
+            UiAction::ChangeMainColor(id, color) => {
+                if let Some(obj) = self.state.get_object_mut(id) {
+                    obj.color = color;
+                }
+                // Rebuild mesh with new color
+                if let Some(obj) = self.state.get_object(id).cloned() {
+                    self.object_meshes.remove(&id);
+                    self.create_object_mesh(&obj);
+                }
+            }
+            UiAction::ChangeAccentColor(id, color) => {
+                if let Some(obj) = self.state.get_object_mut(id) {
+                    obj.accent_color = color;
+                }
+                // Rebuild mesh with new color
+                if let Some(obj) = self.state.get_object(id).cloned() {
+                    self.object_meshes.remove(&id);
+                    self.create_object_mesh(&obj);
+                }
+            }
+            UiAction::ClearAll => {
+                self.state.objects.clear();
+                self.object_meshes.clear();
+                self.ui_state.close_customization();
+                info!("Cleared all objects from UI");
+            }
+            UiAction::CloseCustomization => {
+                self.ui_state.close_customization();
+            }
+            UiAction::None => {}
+        }
+    }
+
+    /// Handle a window event, returning whether egui consumed it
+    fn handle_event(&mut self, event: &WindowEvent) -> bool {
+        // First pass event to egui
+        let response = self.egui_state.on_window_event(&self.window, event);
+
+        // If egui consumed the event, don't process it further
+        if response.consumed {
+            return true;
+        }
+
         match event {
             WindowEvent::MouseInput { button, state, .. } => {
                 if *button == MouseButton::Left {
@@ -575,6 +735,16 @@ impl App {
                         }
                     } else {
                         self.try_pick_object();
+                    }
+                } else if *button == MouseButton::Right && *state == ElementState::Pressed {
+                    // Right-click to open customization panel for clicked object
+                    if let Some(id) = self.find_object_at_cursor() {
+                        if let Some(obj) = self.state.get_object(id) {
+                            self.ui_state.open_customization(id, obj.color, obj.accent_color);
+                        }
+                    } else {
+                        // Right-click on empty space toggles the left sidebar
+                        self.ui_state.toggle_left_sidebar();
                     }
                 }
             }
@@ -667,12 +837,56 @@ impl App {
                                 info!("Deleted object");
                             }
                         }
+                        KeyCode::Escape if event.state == ElementState::Pressed => {
+                            // Close panels
+                            self.ui_state.close_customization();
+                            self.ui_state.left_sidebar_open = false;
+                        }
                         _ => {}
                     }
                 }
             }
             _ => {}
         }
+        false
+    }
+
+    /// Find object at cursor position (without starting drag)
+    fn find_object_at_cursor(&self) -> Option<u64> {
+        let (mx, my) = self.mouse_position;
+        let ndc_x = (2.0 * mx / self.size.width as f32) - 1.0;
+        let ndc_y = 1.0 - (2.0 * my / self.size.height as f32);
+
+        let inv_proj = self.camera.projection_matrix().inverse();
+        let inv_view = self.camera.view_matrix().inverse();
+
+        let ray_clip = glam::Vec4::new(ndc_x, ndc_y, -1.0, 1.0);
+        let ray_eye = inv_proj * ray_clip;
+        let ray_eye = glam::Vec4::new(ray_eye.x, ray_eye.y, -1.0, 0.0);
+        let ray_world = (inv_view * ray_eye).truncate().normalize();
+
+        let ray_origin = self.camera.position;
+        let mut best_id = None;
+        let mut best_dist = f32::MAX;
+
+        for obj in &self.state.objects {
+            let to_obj = obj.position - ray_origin;
+            let t = to_obj.dot(ray_world);
+            if t < 0.0 {
+                continue;
+            }
+
+            let closest = ray_origin + ray_world * t;
+            let dist = (closest - obj.position).length();
+            let radius = obj.collision_radius() * 1.5;
+
+            if dist < radius && t < best_dist {
+                best_dist = t;
+                best_id = Some(obj.id);
+            }
+        }
+
+        best_id
     }
 
     fn try_pick_object(&mut self) {
@@ -909,6 +1123,62 @@ impl App {
     }
 }
 
+/// Application wrapper for winit 0.30 ApplicationHandler
+struct AppWrapper {
+    app: Option<App>,
+}
+
+impl ApplicationHandler for AppWrapper {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.app.is_none() {
+            let window_attrs = WindowAttributes::default()
+                .with_title("Focus Desktop Simulator")
+                .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
+
+            let window = Arc::new(
+                event_loop
+                    .create_window(window_attrs)
+                    .expect("Failed to create window"),
+            );
+
+            self.app = Some(pollster::block_on(App::new(window)).expect("Failed to create app"));
+            info!("Application initialized");
+        }
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
+        let Some(app) = &mut self.app else { return };
+
+        let _egui_consumed = app.handle_event(&event);
+
+        match event {
+            WindowEvent::CloseRequested => {
+                info!("Saving state and exiting...");
+                let _ = app.save_state();
+                event_loop.exit();
+            }
+            WindowEvent::Resized(size) => app.resize(size),
+            WindowEvent::RedrawRequested => {
+                app.update();
+                if let Err(e) = app.render() {
+                    match e {
+                        wgpu::SurfaceError::Lost => app.resize(app.size),
+                        wgpu::SurfaceError::OutOfMemory => event_loop.exit(),
+                        _ => log::error!("Render error: {:?}", e),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(app) = &self.app {
+            app.window.request_redraw();
+        }
+    }
+}
+
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_millis()
@@ -916,59 +1186,20 @@ fn main() {
 
     info!("Starting Focus Desktop Simulator...");
     info!("Controls:");
-    info!("  T - Cycle through object types");
-    info!("  A - Add selected object");
-    info!("  Delete - Delete dragged object");
+    info!("  Click Menu button (top-left) - Open object palette");
+    info!("  Right-click on object - Open customization panel");
+    info!("  Right-click on empty space - Toggle palette");
     info!("  Click+Drag - Move object");
     info!("  Scroll - Rotate object");
     info!("  Shift+Scroll - Scale object");
+    info!("  Delete - Delete dragged object");
+    info!("  Escape - Close panels");
+    info!("  T - Cycle through object types (keyboard shortcut)");
+    info!("  A - Add selected object (keyboard shortcut)");
 
     let event_loop = EventLoop::new().expect("Failed to create event loop");
-
-    let window = WindowBuilder::new()
-        .with_title("Focus Desktop Simulator")
-        .with_inner_size(winit::dpi::LogicalSize::new(1280, 720))
-        .build(&event_loop)
-        .expect("Failed to create window");
-
-    let window = Arc::new(window);
-    let mut app = pollster::block_on(App::new(window.clone())).expect("Failed to create app");
-
-    info!("Application initialized");
-
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    event_loop
-        .run(move |event, elwt| {
-            match event {
-                Event::WindowEvent { event, window_id } if window_id == window.id() => {
-                    app.handle_event(&event);
-
-                    match event {
-                        WindowEvent::CloseRequested => {
-                            info!("Saving state and exiting...");
-                            let _ = app.save_state();
-                            elwt.exit();
-                        }
-                        WindowEvent::Resized(size) => app.resize(size),
-                        WindowEvent::RedrawRequested => {
-                            app.update();
-                            if let Err(e) = app.render() {
-                                match e {
-                                    wgpu::SurfaceError::Lost => app.resize(app.size),
-                                    wgpu::SurfaceError::OutOfMemory => elwt.exit(),
-                                    _ => log::error!("Render error: {:?}", e),
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                Event::AboutToWait => {
-                    window.request_redraw();
-                }
-                _ => {}
-            }
-        })
-        .expect("Event loop error");
+    let mut app_wrapper = AppWrapper { app: None };
+    event_loop.run_app(&mut app_wrapper).expect("Event loop error");
 }
