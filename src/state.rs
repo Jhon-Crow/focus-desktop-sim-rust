@@ -73,7 +73,13 @@ impl AppState {
                         state
                     }
                     Err(e) => {
-                        log::error!("Failed to parse state file: {}", e);
+                        log::warn!(
+                            "State file format is outdated or corrupted: {}. \
+                            Creating backup and using default state.",
+                            e
+                        );
+                        // Try to backup the corrupted file for potential recovery
+                        Self::backup_corrupted_state(&path);
                         Self::default()
                     }
                 }
@@ -82,6 +88,20 @@ impl AppState {
                 log::error!("Failed to read state file: {}", e);
                 Self::default()
             }
+        }
+    }
+
+    /// Backup a corrupted state file so user doesn't lose data
+    fn backup_corrupted_state(path: &PathBuf) {
+        let backup_path = path.with_extension("json.backup");
+        if let Err(e) = fs::copy(path, &backup_path) {
+            log::warn!("Could not backup corrupted state file: {}", e);
+        } else {
+            log::info!(
+                "Backed up old state file to {:?}. \
+                You can try to recover data from this file manually.",
+                backup_path
+            );
         }
     }
 
