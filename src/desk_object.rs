@@ -25,6 +25,138 @@ pub enum ObjectType {
     Metronome,
     Paper,
     Magazine,
+    MusicPlayer,
+    Pen,
+}
+
+/// Drink types for the coffee mug
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DrinkType {
+    #[default]
+    Coffee,
+    Tea,
+    HotChocolate,
+    Water,
+    Milk,
+}
+
+impl DrinkType {
+    /// Get the color for this drink type (RGB hex)
+    pub fn color(&self) -> u32 {
+        match self {
+            DrinkType::Coffee => 0x3d2314,      // Dark brown
+            DrinkType::Tea => 0xc68b59,         // Amber/tea color
+            DrinkType::HotChocolate => 0x4a3728, // Chocolate brown
+            DrinkType::Water => 0x87ceeb,       // Light blue
+            DrinkType::Milk => 0xfdfff5,        // Off-white
+        }
+    }
+
+    /// Get display name
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            DrinkType::Coffee => "Coffee",
+            DrinkType::Tea => "Tea",
+            DrinkType::HotChocolate => "Hot Chocolate",
+            DrinkType::Water => "Water",
+            DrinkType::Milk => "Milk",
+        }
+    }
+
+    /// Get all drink types
+    pub fn all() -> &'static [DrinkType] {
+        &[
+            DrinkType::Coffee,
+            DrinkType::Tea,
+            DrinkType::HotChocolate,
+            DrinkType::Water,
+            DrinkType::Milk,
+        ]
+    }
+}
+
+/// Object-specific interactive state
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ObjectState {
+    /// Lamp: Whether the light is on
+    #[serde(default)]
+    pub lamp_on: bool,
+
+    /// Globe: Whether the globe is rotating
+    #[serde(default)]
+    pub globe_rotating: bool,
+
+    /// Globe: Current rotation angle in radians
+    #[serde(default)]
+    pub globe_angle: f32,
+
+    /// Hourglass: Whether currently flipping
+    #[serde(default)]
+    pub hourglass_flipping: bool,
+
+    /// Hourglass: Flip animation progress (0.0 to 1.0)
+    #[serde(default)]
+    pub hourglass_flip_progress: f32,
+
+    /// Photo Frame: Path to the photo file (optional)
+    #[serde(default)]
+    pub photo_path: Option<String>,
+
+    /// Music Player: Whether playing
+    #[serde(default)]
+    pub music_playing: bool,
+
+    /// Music Player: Path to music folder/file
+    #[serde(default)]
+    pub music_path: Option<String>,
+
+    /// Music Player: Volume (0.0 to 1.0)
+    #[serde(default = "default_volume")]
+    pub music_volume: f32,
+
+    /// Metronome: Whether running
+    #[serde(default)]
+    pub metronome_running: bool,
+
+    /// Metronome: Beats per minute
+    #[serde(default = "default_bpm")]
+    pub metronome_bpm: u32,
+
+    /// Coffee Mug: Drink type
+    #[serde(default)]
+    pub drink_type: DrinkType,
+
+    /// Coffee Mug: Fill level (0.0 to 1.0)
+    #[serde(default = "default_fill_level")]
+    pub fill_level: f32,
+
+    /// Coffee Mug: Whether the drink is hot (shows steam)
+    #[serde(default)]
+    pub is_hot: bool,
+
+    /// Clock: Current hour angle (radians, calculated from real time)
+    #[serde(skip)]
+    pub clock_hour_angle: f32,
+
+    /// Clock: Current minute angle (radians, calculated from real time)
+    #[serde(skip)]
+    pub clock_minute_angle: f32,
+
+    /// Clock: Current second angle (radians, calculated from real time)
+    #[serde(skip)]
+    pub clock_second_angle: f32,
+}
+
+fn default_fill_level() -> f32 {
+    0.8
+}
+
+fn default_volume() -> f32 {
+    0.5
+}
+
+fn default_bpm() -> u32 {
+    120
 }
 
 impl ObjectType {
@@ -46,6 +178,8 @@ impl ObjectType {
             ObjectType::Metronome => "Metronome",
             ObjectType::Paper => "Paper",
             ObjectType::Magazine => "Magazine",
+            ObjectType::MusicPlayer => "Music Player",
+            ObjectType::Pen => "Pen",
         }
     }
 
@@ -67,6 +201,8 @@ impl ObjectType {
             ObjectType::Metronome => "\u{1F3B5}", // Musical note
             ObjectType::Paper => "\u{1F4C4}", // Page
             ObjectType::Magazine => "\u{1F4F0}", // Newspaper
+            ObjectType::MusicPlayer => "\u{1F3B6}", // Musical notes
+            ObjectType::Pen => "\u{1F58A}", // Pen
         }
     }
 
@@ -88,6 +224,8 @@ impl ObjectType {
             ObjectType::Metronome => 0x78350f,
             ObjectType::Paper => 0xffffff,
             ObjectType::Magazine => 0xef4444,
+            ObjectType::MusicPlayer => 0x1e293b,
+            ObjectType::Pen => 0x3b82f6,
         }
     }
 
@@ -109,6 +247,8 @@ impl ObjectType {
             ObjectType::Metronome => 0xfbbf24,
             ObjectType::Paper => 0x000000,
             ObjectType::Magazine => 0xffffff,
+            ObjectType::MusicPlayer => 0x22c55e,
+            ObjectType::Pen => 0x1e293b,
         }
     }
 
@@ -235,6 +375,22 @@ impl ObjectType {
                 friction: 0.65,
                 no_stacking_on_top: false,
             },
+            ObjectType::MusicPlayer => ObjectPhysics {
+                weight: 0.8,
+                stability: 0.85,
+                height: 0.15,
+                base_offset: 0.0,
+                friction: 0.55,
+                no_stacking_on_top: false,
+            },
+            ObjectType::Pen => ObjectPhysics {
+                weight: 0.05,
+                stability: 0.3,
+                height: 0.02,
+                base_offset: 0.0,
+                friction: 0.4,
+                no_stacking_on_top: false,
+            },
         }
     }
 
@@ -256,7 +412,24 @@ impl ObjectType {
             ObjectType::Metronome,
             ObjectType::Paper,
             ObjectType::Magazine,
+            ObjectType::MusicPlayer,
+            ObjectType::Pen,
         ]
+    }
+
+    /// Check if this object type has interactive features
+    pub fn is_interactive(&self) -> bool {
+        matches!(
+            self,
+            ObjectType::Clock
+                | ObjectType::Lamp
+                | ObjectType::Globe
+                | ObjectType::Hourglass
+                | ObjectType::PhotoFrame
+                | ObjectType::Metronome
+                | ObjectType::MusicPlayer
+                | ObjectType::Coffee
+        )
     }
 }
 
@@ -307,6 +480,9 @@ pub struct DeskObject {
     /// Custom collision height multiplier (1.0 = default)
     #[serde(default = "default_multiplier")]
     pub collision_height_multiplier: f32,
+    /// Object-specific interactive state
+    #[serde(default)]
+    pub state: ObjectState,
     /// Whether the object is currently being dragged
     #[serde(skip)]
     pub is_dragging: bool,
@@ -363,6 +539,7 @@ impl DeskObject {
             accent_color: object_type.default_accent_color(),
             collision_radius_multiplier: 1.0,
             collision_height_multiplier: 1.0,
+            state: ObjectState::default(),
             is_dragging: false,
             target_y: y,
             original_y: y,
@@ -380,7 +557,7 @@ impl DeskObject {
 
     /// Get the collision radius for this object
     pub fn collision_radius(&self) -> f32 {
-        let physics = self.object_type.physics();
+        let _physics = self.object_type.physics();
         // Base radius based on object type, scaled
         let base_radius = match self.object_type {
             ObjectType::Lamp => 0.3,
@@ -391,6 +568,7 @@ impl DeskObject {
             ObjectType::Books => 0.3,
             ObjectType::Globe => 0.25,
             ObjectType::Trophy => 0.2,
+            ObjectType::MusicPlayer => 0.25,
             _ => 0.2,
         };
         base_radius * self.scale * self.collision_radius_multiplier

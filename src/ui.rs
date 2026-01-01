@@ -4,7 +4,7 @@
 //! - Left sidebar: Object palette with categories (like the reference Electron app)
 //! - Right sidebar: Object customization panel (colors, delete)
 
-use crate::desk_object::ObjectType;
+use crate::desk_object::{DrinkType, ObjectType};
 use egui::{Color32, RichText, Vec2};
 
 /// Palette category for organizing object types
@@ -65,6 +65,10 @@ pub struct UiState {
     pub current_main_color: u32,
     /// Current accent color for selected object
     pub current_accent_color: u32,
+    /// Whether pointer lock is active (FPS mode)
+    pub pointer_locked: bool,
+    /// ID of object currently under crosshair
+    pub crosshair_target_id: Option<u64>,
 }
 
 impl Default for UiState {
@@ -122,6 +126,11 @@ impl UiState {
                         name: "Pen Holder",
                         icon: "🖊️",
                     },
+                    PaletteVariant {
+                        object_type: ObjectType::Pen,
+                        name: "Pen",
+                        icon: "🖊️",
+                    },
                 ],
                 expanded: false,
             },
@@ -140,16 +149,6 @@ impl UiState {
                         icon: "📰",
                     },
                 ],
-                expanded: false,
-            },
-            PaletteCategory {
-                name: "Audio",
-                icon: "🎵",
-                variants: vec![PaletteVariant {
-                    object_type: ObjectType::Metronome,
-                    name: "Metronome",
-                    icon: "🎵",
-                }],
                 expanded: false,
             },
             PaletteCategory {
@@ -199,6 +198,23 @@ impl UiState {
                 }],
                 expanded: false,
             },
+            PaletteCategory {
+                name: "Music",
+                icon: "🎵",
+                variants: vec![
+                    PaletteVariant {
+                        object_type: ObjectType::MusicPlayer,
+                        name: "Music Player",
+                        icon: "🎶",
+                    },
+                    PaletteVariant {
+                        object_type: ObjectType::Metronome,
+                        name: "Metronome",
+                        icon: "🎵",
+                    },
+                ],
+                expanded: false,
+            },
         ];
 
         Self {
@@ -208,6 +224,8 @@ impl UiState {
             selected_object_id: None,
             current_main_color: 0xFFFFFF,
             current_accent_color: 0x1E293B,
+            pointer_locked: false,
+            crosshair_target_id: None,
         }
     }
 
@@ -247,6 +265,26 @@ pub enum UiAction {
     ClearAll,
     /// Close the customization panel
     CloseCustomization,
+    /// Toggle lamp on/off
+    ToggleLamp(u64),
+    /// Toggle globe rotation
+    ToggleGlobeRotation(u64),
+    /// Flip hourglass
+    FlipHourglass(u64),
+    /// Toggle metronome
+    ToggleMetronome(u64),
+    /// Change metronome BPM
+    ChangeMetronomeBpm(u64, u32),
+    /// Toggle music player
+    ToggleMusicPlayer(u64),
+    /// Select photo for photo frame
+    SelectPhoto(u64),
+    /// Change drink type in coffee mug
+    ChangeDrinkType(u64, DrinkType),
+    /// Change fill level in coffee mug
+    ChangeFillLevel(u64, f32),
+    /// Toggle hot/cold for coffee mug
+    ToggleHot(u64),
     /// No action
     None,
 }
@@ -377,8 +415,27 @@ pub fn render_left_sidebar(ctx: &egui::Context, ui_state: &mut UiState) -> Vec<U
     actions
 }
 
+/// Object info passed to the right sidebar for rendering interactive controls
+#[derive(Debug, Clone)]
+pub struct ObjectInfo {
+    pub object_type: ObjectType,
+    pub lamp_on: bool,
+    pub globe_rotating: bool,
+    pub metronome_running: bool,
+    pub metronome_bpm: u32,
+    pub music_playing: bool,
+    pub drink_type: DrinkType,
+    pub fill_level: f32,
+    pub is_hot: bool,
+}
+
 /// Render the right sidebar (object customization)
-pub fn render_right_sidebar(ctx: &egui::Context, ui_state: &mut UiState, object_name: Option<&str>) -> Vec<UiAction> {
+pub fn render_right_sidebar(
+    ctx: &egui::Context,
+    ui_state: &mut UiState,
+    object_name: Option<&str>,
+    object_info: Option<&ObjectInfo>,
+) -> Vec<UiAction> {
     let mut actions = Vec::new();
 
     if !ui_state.right_sidebar_open || ui_state.selected_object_id.is_none() {
@@ -409,6 +466,252 @@ pub fn render_right_sidebar(ctx: &egui::Context, ui_state: &mut UiState, object_
             ui.add_space(10.0);
             ui.separator();
             ui.add_space(15.0);
+
+            // Object-specific interactive controls
+            if let Some(info) = object_info {
+                match info.object_type {
+                    ObjectType::Lamp => {
+                        ui.label(RichText::new("LAMP CONTROLS").size(11.0).color(Color32::from_gray(150)));
+                        ui.add_space(8.0);
+
+                        let status = if info.lamp_on { "ON 💡" } else { "OFF" };
+                        let btn_color = if info.lamp_on {
+                            Color32::from_rgb(251, 191, 36)
+                        } else {
+                            Color32::from_gray(80)
+                        };
+
+                        let toggle_btn = egui::Button::new(
+                            RichText::new(format!("Light: {}", status))
+                                .size(14.0)
+                                .color(Color32::WHITE),
+                        )
+                        .fill(btn_color)
+                        .min_size(Vec2::new(ui.available_width() - 20.0, 40.0));
+
+                        if ui.add(toggle_btn).clicked() {
+                            actions.push(UiAction::ToggleLamp(object_id));
+                        }
+
+                        ui.add_space(15.0);
+                        ui.separator();
+                        ui.add_space(15.0);
+                    }
+                    ObjectType::Globe => {
+                        ui.label(RichText::new("GLOBE CONTROLS").size(11.0).color(Color32::from_gray(150)));
+                        ui.add_space(8.0);
+
+                        let status = if info.globe_rotating { "Spinning 🌍" } else { "Stopped" };
+                        let btn_color = if info.globe_rotating {
+                            Color32::from_rgb(59, 130, 246)
+                        } else {
+                            Color32::from_gray(80)
+                        };
+
+                        let toggle_btn = egui::Button::new(
+                            RichText::new(format!("Rotation: {}", status))
+                                .size(14.0)
+                                .color(Color32::WHITE),
+                        )
+                        .fill(btn_color)
+                        .min_size(Vec2::new(ui.available_width() - 20.0, 40.0));
+
+                        if ui.add(toggle_btn).clicked() {
+                            actions.push(UiAction::ToggleGlobeRotation(object_id));
+                        }
+
+                        ui.add_space(15.0);
+                        ui.separator();
+                        ui.add_space(15.0);
+                    }
+                    ObjectType::Hourglass => {
+                        ui.label(RichText::new("HOURGLASS CONTROLS").size(11.0).color(Color32::from_gray(150)));
+                        ui.add_space(8.0);
+
+                        let flip_btn = egui::Button::new(
+                            RichText::new("⏳ Flip Hourglass")
+                                .size(14.0)
+                                .color(Color32::WHITE),
+                        )
+                        .fill(Color32::from_rgb(251, 191, 36))
+                        .min_size(Vec2::new(ui.available_width() - 20.0, 40.0));
+
+                        if ui.add(flip_btn).clicked() {
+                            actions.push(UiAction::FlipHourglass(object_id));
+                        }
+
+                        ui.add_space(15.0);
+                        ui.separator();
+                        ui.add_space(15.0);
+                    }
+                    ObjectType::Metronome => {
+                        ui.label(RichText::new("METRONOME CONTROLS").size(11.0).color(Color32::from_gray(150)));
+                        ui.add_space(8.0);
+
+                        let status = if info.metronome_running { "Playing 🎵" } else { "Stopped" };
+                        let btn_color = if info.metronome_running {
+                            Color32::from_rgb(34, 197, 94)
+                        } else {
+                            Color32::from_gray(80)
+                        };
+
+                        let toggle_btn = egui::Button::new(
+                            RichText::new(format!("{}", status))
+                                .size(14.0)
+                                .color(Color32::WHITE),
+                        )
+                        .fill(btn_color)
+                        .min_size(Vec2::new(ui.available_width() - 20.0, 40.0));
+
+                        if ui.add(toggle_btn).clicked() {
+                            actions.push(UiAction::ToggleMetronome(object_id));
+                        }
+
+                        ui.add_space(10.0);
+                        ui.label(RichText::new(format!("BPM: {}", info.metronome_bpm)).size(12.0).color(Color32::from_gray(200)));
+
+                        ui.add_space(15.0);
+                        ui.separator();
+                        ui.add_space(15.0);
+                    }
+                    ObjectType::MusicPlayer => {
+                        ui.label(RichText::new("MUSIC PLAYER CONTROLS").size(11.0).color(Color32::from_gray(150)));
+                        ui.add_space(8.0);
+
+                        let status = if info.music_playing { "Playing 🎶" } else { "Stopped" };
+                        let btn_color = if info.music_playing {
+                            Color32::from_rgb(34, 197, 94)
+                        } else {
+                            Color32::from_gray(80)
+                        };
+
+                        let toggle_btn = egui::Button::new(
+                            RichText::new(format!("{}", status))
+                                .size(14.0)
+                                .color(Color32::WHITE),
+                        )
+                        .fill(btn_color)
+                        .min_size(Vec2::new(ui.available_width() - 20.0, 40.0));
+
+                        if ui.add(toggle_btn).clicked() {
+                            actions.push(UiAction::ToggleMusicPlayer(object_id));
+                        }
+
+                        ui.add_space(15.0);
+                        ui.separator();
+                        ui.add_space(15.0);
+                    }
+                    ObjectType::PhotoFrame => {
+                        ui.label(RichText::new("PHOTO FRAME CONTROLS").size(11.0).color(Color32::from_gray(150)));
+                        ui.add_space(8.0);
+
+                        let select_btn = egui::Button::new(
+                            RichText::new("🖼️ Select Photo...")
+                                .size(14.0)
+                                .color(Color32::WHITE),
+                        )
+                        .fill(Color32::from_rgb(79, 70, 229))
+                        .min_size(Vec2::new(ui.available_width() - 20.0, 40.0));
+
+                        if ui.add(select_btn).clicked() {
+                            actions.push(UiAction::SelectPhoto(object_id));
+                        }
+
+                        ui.add_space(15.0);
+                        ui.separator();
+                        ui.add_space(15.0);
+                    }
+                    ObjectType::Coffee => {
+                        ui.label(RichText::new("COFFEE MUG CONTROLS").size(11.0).color(Color32::from_gray(150)));
+                        ui.add_space(8.0);
+
+                        // Drink type selection
+                        ui.label(RichText::new("Drink Type:").size(12.0).color(Color32::from_gray(200)));
+                        ui.add_space(4.0);
+
+                        ui.horizontal_wrapped(|ui| {
+                            for drink in DrinkType::all() {
+                                let is_selected = info.drink_type == *drink;
+                                let color = drink.color();
+                                let r = ((color >> 16) & 0xFF) as u8;
+                                let g = ((color >> 8) & 0xFF) as u8;
+                                let b = (color & 0xFF) as u8;
+
+                                let btn = egui::Button::new(
+                                    RichText::new(drink.display_name())
+                                        .size(11.0)
+                                        .color(if is_selected { Color32::WHITE } else { Color32::from_gray(200) }),
+                                )
+                                .fill(if is_selected {
+                                    Color32::from_rgb(r, g, b)
+                                } else {
+                                    Color32::from_rgba_unmultiplied(r, g, b, 80)
+                                })
+                                .min_size(Vec2::new(70.0, 28.0));
+
+                                if ui.add(btn).clicked() {
+                                    actions.push(UiAction::ChangeDrinkType(object_id, *drink));
+                                }
+                            }
+                        });
+
+                        ui.add_space(10.0);
+
+                        // Fill level slider
+                        ui.label(RichText::new(format!("Fill Level: {:.0}%", info.fill_level * 100.0)).size(12.0).color(Color32::from_gray(200)));
+                        ui.add_space(4.0);
+
+                        // Using buttons for fill level adjustment
+                        ui.horizontal(|ui| {
+                            for level in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                                let is_selected = (info.fill_level - level).abs() < 0.05;
+                                let btn = egui::Button::new(
+                                    RichText::new(format!("{:.0}%", level * 100.0))
+                                        .size(11.0)
+                                        .color(if is_selected { Color32::WHITE } else { Color32::from_gray(180) }),
+                                )
+                                .fill(if is_selected {
+                                    Color32::from_rgb(79, 70, 229)
+                                } else {
+                                    Color32::from_gray(60)
+                                })
+                                .min_size(Vec2::new(42.0, 28.0));
+
+                                if ui.add(btn).clicked() {
+                                    actions.push(UiAction::ChangeFillLevel(object_id, level));
+                                }
+                            }
+                        });
+
+                        ui.add_space(10.0);
+
+                        // Hot/Cold toggle
+                        let hot_status = if info.is_hot { "Hot ☕" } else { "Cold" };
+                        let hot_color = if info.is_hot {
+                            Color32::from_rgb(239, 68, 68)
+                        } else {
+                            Color32::from_gray(80)
+                        };
+
+                        let hot_btn = egui::Button::new(
+                            RichText::new(format!("Temperature: {}", hot_status))
+                                .size(14.0)
+                                .color(Color32::WHITE),
+                        )
+                        .fill(hot_color)
+                        .min_size(Vec2::new(ui.available_width() - 20.0, 40.0));
+
+                        if ui.add(hot_btn).clicked() {
+                            actions.push(UiAction::ToggleHot(object_id));
+                        }
+
+                        ui.add_space(15.0);
+                        ui.separator();
+                        ui.add_space(15.0);
+                    }
+                    _ => {}
+                }
+            }
 
             // Main color section
             ui.label(RichText::new("MAIN COLOR").size(11.0).color(Color32::from_gray(150)));
@@ -510,4 +813,77 @@ pub fn hex_to_color32(hex: u32) -> Color32 {
     let g = ((hex >> 8) & 0xFF) as u8;
     let b = (hex & 0xFF) as u8;
     Color32::from_rgb(r, g, b)
+}
+
+/// Render the crosshair at the center of the screen
+/// The crosshair is used for FPS-style object interaction
+pub fn render_crosshair(ctx: &egui::Context, pointer_locked: bool, hovering_object: bool) {
+    // Only show crosshair when pointer is locked (FPS mode)
+    if !pointer_locked {
+        return;
+    }
+
+    let screen_rect = ctx.screen_rect();
+    let center = screen_rect.center();
+
+    // Crosshair properties
+    let size = 12.0;
+    let thickness = 2.0;
+    let gap = 4.0; // Gap in the middle
+
+    // Color based on whether hovering over an object
+    let color = if hovering_object {
+        Color32::from_rgb(79, 70, 229) // Purple when hovering object
+    } else {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 180) // White semi-transparent
+    };
+
+    egui::Area::new(egui::Id::new("crosshair"))
+        .fixed_pos(egui::pos2(0.0, 0.0))
+        .order(egui::Order::Foreground)
+        .interactable(false)
+        .show(ctx, |ui| {
+            let painter = ui.painter();
+
+            // Horizontal line (left part)
+            painter.line_segment(
+                [
+                    egui::pos2(center.x - size, center.y),
+                    egui::pos2(center.x - gap, center.y),
+                ],
+                egui::Stroke::new(thickness, color),
+            );
+
+            // Horizontal line (right part)
+            painter.line_segment(
+                [
+                    egui::pos2(center.x + gap, center.y),
+                    egui::pos2(center.x + size, center.y),
+                ],
+                egui::Stroke::new(thickness, color),
+            );
+
+            // Vertical line (top part)
+            painter.line_segment(
+                [
+                    egui::pos2(center.x, center.y - size),
+                    egui::pos2(center.x, center.y - gap),
+                ],
+                egui::Stroke::new(thickness, color),
+            );
+
+            // Vertical line (bottom part)
+            painter.line_segment(
+                [
+                    egui::pos2(center.x, center.y + gap),
+                    egui::pos2(center.x, center.y + size),
+                ],
+                egui::Stroke::new(thickness, color),
+            );
+
+            // Center dot when hovering
+            if hovering_object {
+                painter.circle_filled(center, 2.0, color);
+            }
+        });
 }

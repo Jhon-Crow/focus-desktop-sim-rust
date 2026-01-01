@@ -14,10 +14,10 @@ mod ui;
 use camera::Camera;
 use config::{hex_to_rgb, hex_to_rgba, CONFIG};
 use desk_object::{DeskObject, ObjectType};
-use mesh::{generate_object_mesh, MeshData, Vertex};
+use mesh::{generate_object_mesh, generate_object_mesh_with_state, MeshData, Vertex};
 use physics::PhysicsEngine;
 use state::AppState;
-use ui::{render_left_sidebar, render_right_sidebar, UiAction, UiState};
+use ui::{render_left_sidebar, render_right_sidebar, render_crosshair, ObjectInfo, UiAction, UiState};
 
 use egui_wgpu::ScreenDescriptor;
 use glam::{Mat4, Quat, Vec3};
@@ -84,6 +84,35 @@ impl ModelUniform {
     }
 }
 
+/// Maximum number of point lights
+const MAX_LIGHTS: usize = 8;
+
+/// Lighting uniform buffer data for dynamic lighting
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct LightingUniform {
+    /// Point light positions (xyz) and intensity (w)
+    /// w = 0.0 means light is off, w > 0 means on with that intensity
+    point_lights: [[f32; 4]; MAX_LIGHTS],
+    /// Number of active lights
+    num_lights: u32,
+    /// Room darkness level (0.0 = bright, 1.0 = very dark)
+    room_darkness: f32,
+    /// Padding for alignment
+    _padding: [f32; 2],
+}
+
+impl LightingUniform {
+    fn new() -> Self {
+        Self {
+            point_lights: [[0.0; 4]; MAX_LIGHTS],
+            num_lights: 0,
+            room_darkness: 1.0, // Start with dark room
+            _padding: [0.0; 2],
+        }
+    }
+}
+
 /// GPU mesh handle
 struct GpuMesh {
     vertex_buffer: wgpu::Buffer,
@@ -123,6 +152,7 @@ struct App {
     size: PhysicalSize<u32>,
     render_pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
+    lighting_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     model_bind_group_layout: wgpu::BindGroupLayout,
     depth_texture: wgpu::TextureView,
@@ -217,28 +247,54 @@ impl App {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        // Create camera bind group layout
+        // Create lighting uniform buffer
+        let lighting_uniform = LightingUniform::new();
+        let lighting_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Lighting Buffer"),
+            contents: bytemuck::cast_slice(&[lighting_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // Create camera/lighting bind group layout (group 0)
         let camera_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                }],
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
                 label: Some("camera_bind_group_layout"),
             });
 
         let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &camera_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: lighting_buffer.as_entire_binding(),
+                },
+            ],
             label: Some("camera_bind_group"),
         });
 
@@ -357,6 +413,7 @@ impl App {
             size,
             render_pipeline,
             camera_buffer,
+            lighting_buffer,
             camera_bind_group,
             model_bind_group_layout,
             depth_texture,
@@ -401,11 +458,15 @@ impl App {
     }
 
     fn create_object_mesh(&mut self, obj: &DeskObject) {
-        self.create_object_mesh_from_data(
-            obj.id,
+        let mesh_data = generate_object_mesh_with_state(
             obj.object_type,
             obj.color,
             obj.accent_color,
+            Some(&obj.state),
+        );
+        self.create_object_mesh_from_mesh_data(
+            obj.id,
+            mesh_data,
             obj.position,
             obj.rotation,
             obj.scale,
@@ -423,6 +484,17 @@ impl App {
         scale: f32,
     ) {
         let mesh_data = generate_object_mesh(object_type, color, accent_color);
+        self.create_object_mesh_from_mesh_data(id, mesh_data, position, rotation, scale);
+    }
+
+    fn create_object_mesh_from_mesh_data(
+        &mut self,
+        id: u64,
+        mesh_data: MeshData,
+        position: Vec3,
+        rotation: Quat,
+        scale: f32,
+    ) {
         let gpu_mesh = GpuMesh::from_mesh_data(&self.device, &mesh_data);
 
         let model_uniform = ModelUniform::from_transform(position, rotation, scale);
@@ -472,7 +544,7 @@ impl App {
 
     fn update(&mut self) {
         let now = Instant::now();
-        let _dt = (now - self.last_frame_time).as_secs_f32();
+        let dt = (now - self.last_frame_time).as_secs_f32();
         self.last_frame_time = now;
 
         // Update physics for dropping objects
@@ -493,11 +565,127 @@ impl App {
             self.update_object_transform(id);
         }
 
+        // Update animated objects
+        let mut animation_updates: Vec<(u64, Quat)> = Vec::new();
+        let mut clock_updates: Vec<u64> = Vec::new();
+
+        // Get current time for clock updates
+        let current_time = chrono::Local::now();
+        let hours = current_time.format("%H").to_string().parse::<f32>().unwrap_or(0.0);
+        let minutes = current_time.format("%M").to_string().parse::<f32>().unwrap_or(0.0);
+        let seconds = current_time.format("%S").to_string().parse::<f32>().unwrap_or(0.0);
+        let millis = current_time.format("%3f").to_string().parse::<f32>().unwrap_or(0.0) / 1000.0;
+
+        for obj in &mut self.state.objects {
+            match obj.object_type {
+                ObjectType::Clock => {
+                    // Calculate clock hand angles based on real time
+                    // Hours: 360 degrees / 12 hours = 30 degrees per hour + minute offset
+                    let hour_12 = hours % 12.0;
+                    let hour_angle = -(hour_12 + minutes / 60.0) * (std::f32::consts::TAU / 12.0);
+                    // Minutes: 360 degrees / 60 minutes = 6 degrees per minute + second offset
+                    let minute_angle = -(minutes + seconds / 60.0) * (std::f32::consts::TAU / 60.0);
+                    // Seconds: 360 degrees / 60 seconds = 6 degrees per second (smooth with millis)
+                    let second_angle = -(seconds + millis) * (std::f32::consts::TAU / 60.0);
+
+                    // Check if angles changed significantly (avoid constant rebuilds)
+                    let hour_changed = (obj.state.clock_hour_angle - hour_angle).abs() > 0.01;
+                    let minute_changed = (obj.state.clock_minute_angle - minute_angle).abs() > 0.01;
+                    let second_changed = (obj.state.clock_second_angle - second_angle).abs() > 0.01;
+
+                    if hour_changed || minute_changed || second_changed {
+                        obj.state.clock_hour_angle = hour_angle;
+                        obj.state.clock_minute_angle = minute_angle;
+                        obj.state.clock_second_angle = second_angle;
+                        clock_updates.push(obj.id);
+                    }
+                }
+                ObjectType::Globe if obj.state.globe_rotating => {
+                    // Rotate globe around Y axis
+                    obj.state.globe_angle += dt * 0.5; // Rotation speed
+                    if obj.state.globe_angle > std::f32::consts::TAU {
+                        obj.state.globe_angle -= std::f32::consts::TAU;
+                    }
+                    let new_rotation = Quat::from_rotation_y(obj.state.globe_angle);
+                    animation_updates.push((obj.id, new_rotation));
+                }
+                ObjectType::Hourglass if obj.state.hourglass_flipping => {
+                    // Animate hourglass flip (180 degrees around X axis)
+                    obj.state.hourglass_flip_progress += dt * 1.5; // Flip speed
+                    if obj.state.hourglass_flip_progress >= 1.0 {
+                        obj.state.hourglass_flip_progress = 1.0;
+                        obj.state.hourglass_flipping = false;
+                    }
+                    // Smooth ease-in-out animation
+                    let t = obj.state.hourglass_flip_progress;
+                    let eased = if t < 0.5 {
+                        2.0 * t * t
+                    } else {
+                        1.0 - (-2.0 * t + 2.0).powi(2) / 2.0
+                    };
+                    let angle = eased * std::f32::consts::PI;
+                    let new_rotation = Quat::from_rotation_x(angle);
+                    animation_updates.push((obj.id, new_rotation));
+                }
+                _ => {}
+            }
+        }
+
+        // Rebuild clock meshes with updated hand positions
+        for id in clock_updates {
+            if let Some(obj) = self.state.get_object(id).cloned() {
+                self.object_meshes.remove(&id);
+                self.create_object_mesh(&obj);
+            }
+        }
+
+        // Apply rotation updates
+        for (id, rotation) in animation_updates {
+            if let Some(obj) = self.state.get_object_mut(id) {
+                obj.rotation = rotation;
+            }
+            self.update_object_transform(id);
+        }
+
         // Update camera uniform
         let mut camera_uniform = CameraUniform::new();
         camera_uniform.update(&self.camera);
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[camera_uniform]));
+
+        // Update lighting uniform based on lamp states
+        let mut lighting_uniform = LightingUniform::new();
+        let mut light_count = 0u32;
+
+        // Room is dark by default (darkness = 1.0)
+        lighting_uniform.room_darkness = 1.0;
+
+        // Find all lamps and add their lights
+        for obj in &self.state.objects {
+            if obj.object_type == ObjectType::Lamp && obj.state.lamp_on {
+                if light_count < MAX_LIGHTS as u32 {
+                    // Lamp light is at the lamp head position (approximately)
+                    // The lamp is about 0.8 units tall, light is at head (~0.75)
+                    let light_pos = Vec3::new(
+                        obj.position.x,
+                        obj.position.y + 0.75 * obj.scale,
+                        obj.position.z,
+                    );
+                    lighting_uniform.point_lights[light_count as usize] = [
+                        light_pos.x,
+                        light_pos.y,
+                        light_pos.z,
+                        2.5, // Light intensity
+                    ];
+                    light_count += 1;
+                }
+            }
+        }
+
+        lighting_uniform.num_lights = light_count;
+
+        self.queue
+            .write_buffer(&self.lighting_buffer, 0, bytemuck::cast_slice(&[lighting_uniform]));
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -593,14 +781,33 @@ impl App {
 
         // Render egui UI
         // Note: We need to prepare UI data before running egui to avoid borrow issues
-        let object_name = if let Some(id) = self.ui_state.selected_object_id {
-            self.state.get_object(id).map(|obj| obj.object_type.display_name().to_string())
+        let (object_name, object_info) = if let Some(id) = self.ui_state.selected_object_id {
+            self.state.get_object(id).map(|obj| {
+                (
+                    obj.object_type.display_name().to_string(),
+                    ObjectInfo {
+                        object_type: obj.object_type,
+                        lamp_on: obj.state.lamp_on,
+                        globe_rotating: obj.state.globe_rotating,
+                        metronome_running: obj.state.metronome_running,
+                        metronome_bpm: obj.state.metronome_bpm,
+                        music_playing: obj.state.music_playing,
+                        drink_type: obj.state.drink_type,
+                        fill_level: obj.state.fill_level,
+                        is_hot: obj.state.is_hot,
+                    },
+                )
+            }).map_or((None, None), |(name, info)| (Some(name), Some(info)))
         } else {
-            None
+            (None, None)
         };
 
         let egui_input = self.egui_state.take_egui_input(&self.window);
         let egui_ctx = self.egui_ctx.clone();
+
+        // Check if there's an object under the crosshair (for visual feedback)
+        let crosshair_hovering = self.ui_state.crosshair_target_id.is_some();
+        let pointer_locked = self.ui_state.pointer_locked;
 
         let mut ui_actions = Vec::new();
         let egui_output = egui_ctx.run(egui_input, |ctx| {
@@ -609,8 +816,11 @@ impl App {
             ui_actions.extend(left_actions);
 
             // Render right sidebar (customization)
-            let right_actions = render_right_sidebar(ctx, &mut self.ui_state, object_name.as_deref());
+            let right_actions = render_right_sidebar(ctx, &mut self.ui_state, object_name.as_deref(), object_info.as_ref());
             ui_actions.extend(right_actions);
+
+            // Render crosshair (only in pointer lock mode)
+            render_crosshair(ctx, pointer_locked, crosshair_hovering);
         });
 
         // Process UI actions after egui rendering
@@ -706,6 +916,97 @@ impl App {
             UiAction::CloseCustomization => {
                 self.ui_state.close_customization();
             }
+            UiAction::ToggleLamp(id) => {
+                if let Some(obj) = self.state.get_object_mut(id) {
+                    obj.state.lamp_on = !obj.state.lamp_on;
+                    info!("Lamp {} is now {}", id, if obj.state.lamp_on { "ON" } else { "OFF" });
+                    // Rebuild mesh to show light glow effect
+                    let obj_clone = obj.clone();
+                    self.object_meshes.remove(&id);
+                    self.create_object_mesh(&obj_clone);
+                }
+            }
+            UiAction::ToggleGlobeRotation(id) => {
+                if let Some(obj) = self.state.get_object_mut(id) {
+                    obj.state.globe_rotating = !obj.state.globe_rotating;
+                    info!("Globe {} rotation is now {}", id, if obj.state.globe_rotating { "ON" } else { "OFF" });
+                }
+            }
+            UiAction::FlipHourglass(id) => {
+                if let Some(obj) = self.state.get_object_mut(id) {
+                    if !obj.state.hourglass_flipping {
+                        obj.state.hourglass_flipping = true;
+                        obj.state.hourglass_flip_progress = 0.0;
+                        info!("Flipping hourglass {}", id);
+                    }
+                }
+            }
+            UiAction::ToggleMetronome(id) => {
+                if let Some(obj) = self.state.get_object_mut(id) {
+                    obj.state.metronome_running = !obj.state.metronome_running;
+                    info!("Metronome {} is now {}", id, if obj.state.metronome_running { "running" } else { "stopped" });
+                }
+            }
+            UiAction::ChangeMetronomeBpm(id, bpm) => {
+                if let Some(obj) = self.state.get_object_mut(id) {
+                    obj.state.metronome_bpm = bpm;
+                    info!("Metronome {} BPM changed to {}", id, bpm);
+                }
+            }
+            UiAction::ToggleMusicPlayer(id) => {
+                if let Some(obj) = self.state.get_object_mut(id) {
+                    obj.state.music_playing = !obj.state.music_playing;
+                    info!("Music player {} is now {}", id, if obj.state.music_playing { "playing" } else { "stopped" });
+                }
+            }
+            UiAction::SelectPhoto(id) => {
+                // Open file dialog to select an image
+                info!("Photo selection requested for frame {}", id);
+
+                // Use rfd to open a file dialog
+                let file = rfd::FileDialog::new()
+                    .add_filter("Images", &["png", "jpg", "jpeg", "gif", "bmp", "webp"])
+                    .set_title("Select Photo for Frame")
+                    .pick_file();
+
+                if let Some(path) = file {
+                    let path_str = path.to_string_lossy().to_string();
+                    info!("Selected photo: {}", path_str);
+
+                    if let Some(obj) = self.state.get_object_mut(id) {
+                        obj.state.photo_path = Some(path_str.clone());
+                    }
+
+                    // TODO: In the future, load the image texture and apply it to the photo frame mesh
+                    // For now, we just store the path for persistence
+                }
+            }
+            UiAction::ChangeDrinkType(id, drink_type) => {
+                if let Some(obj) = self.state.get_object_mut(id) {
+                    obj.state.drink_type = drink_type;
+                    info!("Coffee mug {} drink type changed to {:?}", id, drink_type);
+                    // Rebuild mesh to show new drink color
+                    let obj_clone = obj.clone();
+                    self.object_meshes.remove(&id);
+                    self.create_object_mesh(&obj_clone);
+                }
+            }
+            UiAction::ChangeFillLevel(id, fill_level) => {
+                if let Some(obj) = self.state.get_object_mut(id) {
+                    obj.state.fill_level = fill_level;
+                    info!("Coffee mug {} fill level changed to {:.0}%", id, fill_level * 100.0);
+                    // Rebuild mesh to show new fill level
+                    let obj_clone = obj.clone();
+                    self.object_meshes.remove(&id);
+                    self.create_object_mesh(&obj_clone);
+                }
+            }
+            UiAction::ToggleHot(id) => {
+                if let Some(obj) = self.state.get_object_mut(id) {
+                    obj.state.is_hot = !obj.state.is_hot;
+                    info!("Coffee mug {} is now {}", id, if obj.state.is_hot { "hot" } else { "cold" });
+                }
+            }
             UiAction::None => {}
         }
     }
@@ -721,11 +1022,29 @@ impl App {
         }
 
         match event {
+            WindowEvent::Focused(focused) => {
+                // Release pointer lock when window loses focus
+                if !focused && self.ui_state.pointer_locked {
+                    self.release_pointer_lock();
+                }
+            }
             WindowEvent::MouseInput { button, state, .. } => {
                 if *button == MouseButton::Left {
                     self.left_mouse_down = *state == ElementState::Pressed;
-                    if !self.left_mouse_down {
-                        // End drag
+
+                    if *state == ElementState::Pressed {
+                        // If not in pointer lock mode, clicking enters it (unless UI is consuming)
+                        if !self.ui_state.pointer_locked && !self.ui_state.left_sidebar_open && !self.ui_state.right_sidebar_open {
+                            self.request_pointer_lock();
+                        } else if self.ui_state.pointer_locked {
+                            // In pointer lock mode, click picks up object under crosshair
+                            self.try_pick_object_crosshair();
+                        } else {
+                            // Not pointer locked but UI might be open, try normal pick
+                            self.try_pick_object();
+                        }
+                    } else {
+                        // Mouse released - end drag
                         if let Some(id) = self.dragging_object_id.take() {
                             let objects_clone: Vec<DeskObject> = self.state.objects.clone();
                             if let Some(obj) = self.state.get_object_mut(id) {
@@ -733,25 +1052,45 @@ impl App {
                                 self.update_object_transform(id);
                             }
                         }
-                    } else {
-                        self.try_pick_object();
                     }
                 } else if *button == MouseButton::Right && *state == ElementState::Pressed {
-                    // Right-click to open customization panel for clicked object
-                    if let Some(id) = self.find_object_at_cursor() {
-                        if let Some(obj) = self.state.get_object(id) {
-                            self.ui_state.open_customization(id, obj.color, obj.accent_color);
+                    if self.ui_state.pointer_locked {
+                        // Right-click in pointer lock mode: open customization for crosshair target
+                        if let Some(id) = self.find_object_at_crosshair() {
+                            if let Some(obj) = self.state.get_object(id) {
+                                self.ui_state.open_customization(id, obj.color, obj.accent_color);
+                                // Exit pointer lock when opening customization
+                                self.release_pointer_lock();
+                            }
+                        } else {
+                            // Right-click on empty space toggles the left sidebar
+                            self.release_pointer_lock();
+                            self.ui_state.toggle_left_sidebar();
                         }
                     } else {
-                        // Right-click on empty space toggles the left sidebar
-                        self.ui_state.toggle_left_sidebar();
+                        // Right-click to open customization panel for clicked object
+                        if let Some(id) = self.find_object_at_cursor() {
+                            if let Some(obj) = self.state.get_object(id) {
+                                self.ui_state.open_customization(id, obj.color, obj.accent_color);
+                            }
+                        } else {
+                            // Right-click on empty space toggles the left sidebar
+                            self.ui_state.toggle_left_sidebar();
+                        }
                     }
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse_position = (position.x as f32, position.y as f32);
-                if self.left_mouse_down && self.dragging_object_id.is_some() {
+
+                // In normal mode, update drag based on cursor position
+                if !self.ui_state.pointer_locked && self.left_mouse_down && self.dragging_object_id.is_some() {
                     self.update_drag();
+                }
+
+                // Update crosshair target (what's under the crosshair)
+                if self.ui_state.pointer_locked {
+                    self.ui_state.crosshair_target_id = self.find_object_at_crosshair();
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -759,14 +1098,36 @@ impl App {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => *y,
                     winit::event::MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / 50.0,
                 };
-                if let Some(id) = self.dragging_object_id {
+
+                // Get the object ID to manipulate (either dragging or under crosshair)
+                let target_id = self.dragging_object_id.or(
+                    if self.ui_state.pointer_locked {
+                        self.ui_state.crosshair_target_id
+                    } else {
+                        // Also support scroll on hovered object in non-pointer-lock mode
+                        self.find_object_at_cursor()
+                    }
+                );
+
+                if let Some(id) = target_id {
                     if self.shift_pressed {
-                        if let Some(obj) = self.state.get_object_mut(id) {
-                            obj.scale = (obj.scale + scroll * 0.1).clamp(0.3, 3.0);
-                            self.update_object_transform(id);
+                        // Shift+Scroll scales the object
+                        let new_scale = if let Some(obj) = self.state.get_object_mut(id) {
+                            // Use a larger multiplier for more noticeable scaling
+                            obj.scale = (obj.scale + scroll * 0.15).clamp(0.3, 3.0);
+                            Some(obj.scale)
+                        } else {
+                            None
+                        };
+                        self.update_object_transform(id);
+                        if let Some(scale) = new_scale {
+                            info!("Scaled object to {:.2}", scale);
                         }
-                    } else if let Some(obj) = self.state.get_object_mut(id) {
-                        obj.rotation = Quat::from_rotation_y(scroll * 0.2) * obj.rotation;
+                    } else {
+                        // Scroll rotates the object
+                        if let Some(obj) = self.state.get_object_mut(id) {
+                            obj.rotation = Quat::from_rotation_y(scroll * 0.2) * obj.rotation;
+                        }
                         self.update_object_transform(id);
                     }
                 }
@@ -779,23 +1140,7 @@ impl App {
                         }
                         KeyCode::KeyA if event.state == ElementState::Pressed => {
                             // Add object of current type
-                            let object_types = [
-                                ObjectType::Clock,
-                                ObjectType::Lamp,
-                                ObjectType::Plant,
-                                ObjectType::Coffee,
-                                ObjectType::Laptop,
-                                ObjectType::Notebook,
-                                ObjectType::PenHolder,
-                                ObjectType::Books,
-                                ObjectType::PhotoFrame,
-                                ObjectType::Globe,
-                                ObjectType::Trophy,
-                                ObjectType::Hourglass,
-                                ObjectType::Metronome,
-                                ObjectType::Paper,
-                                ObjectType::Magazine,
-                            ];
+                            let object_types = ObjectType::all();
                             let obj_type = object_types[self.current_object_type_index];
                             self.add_object(obj_type);
                             info!(
@@ -805,42 +1150,33 @@ impl App {
                         }
                         KeyCode::KeyT if event.state == ElementState::Pressed => {
                             // Cycle through object types
+                            let object_types = ObjectType::all();
                             self.current_object_type_index =
-                                (self.current_object_type_index + 1) % 15;
-                            let object_types = [
-                                ObjectType::Clock,
-                                ObjectType::Lamp,
-                                ObjectType::Plant,
-                                ObjectType::Coffee,
-                                ObjectType::Laptop,
-                                ObjectType::Notebook,
-                                ObjectType::PenHolder,
-                                ObjectType::Books,
-                                ObjectType::PhotoFrame,
-                                ObjectType::Globe,
-                                ObjectType::Trophy,
-                                ObjectType::Hourglass,
-                                ObjectType::Metronome,
-                                ObjectType::Paper,
-                                ObjectType::Magazine,
-                            ];
+                                (self.current_object_type_index + 1) % object_types.len();
                             info!(
                                 "Selected: {} (Press A to add)",
                                 object_types[self.current_object_type_index].display_name()
                             );
                         }
                         KeyCode::Delete if event.state == ElementState::Pressed => {
-                            // Delete dragged object
-                            if let Some(id) = self.dragging_object_id.take() {
+                            // Delete dragged object or object under crosshair
+                            let id_to_delete = self.dragging_object_id.take()
+                                .or(self.ui_state.crosshair_target_id);
+                            if let Some(id) = id_to_delete {
                                 self.state.remove_object(id);
                                 self.object_meshes.remove(&id);
+                                self.ui_state.crosshair_target_id = None;
                                 info!("Deleted object");
                             }
                         }
                         KeyCode::Escape if event.state == ElementState::Pressed => {
-                            // Close panels
-                            self.ui_state.close_customization();
-                            self.ui_state.left_sidebar_open = false;
+                            // First release pointer lock, then close panels
+                            if self.ui_state.pointer_locked {
+                                self.release_pointer_lock();
+                            } else {
+                                self.ui_state.close_customization();
+                                self.ui_state.left_sidebar_open = false;
+                            }
                         }
                         _ => {}
                     }
@@ -849,6 +1185,86 @@ impl App {
             _ => {}
         }
         false
+    }
+
+    /// Request pointer lock (FPS mode)
+    fn request_pointer_lock(&mut self) {
+        // Set cursor grab mode to locked and hide cursor
+        if let Err(e) = self.window.set_cursor_grab(winit::window::CursorGrabMode::Locked) {
+            // Fall back to confined if locked isn't supported
+            if let Err(e2) = self.window.set_cursor_grab(winit::window::CursorGrabMode::Confined) {
+                log::warn!("Could not lock cursor: {:?} / {:?}", e, e2);
+                return;
+            }
+        }
+        self.window.set_cursor_visible(false);
+        self.ui_state.pointer_locked = true;
+        info!("Pointer locked - ESC to exit, mouse to look around");
+    }
+
+    /// Release pointer lock
+    fn release_pointer_lock(&mut self) {
+        let _ = self.window.set_cursor_grab(winit::window::CursorGrabMode::None);
+        self.window.set_cursor_visible(true);
+        self.ui_state.pointer_locked = false;
+        self.ui_state.crosshair_target_id = None;
+
+        // Also end any drag in progress
+        if let Some(id) = self.dragging_object_id.take() {
+            let objects_clone: Vec<DeskObject> = self.state.objects.clone();
+            if let Some(obj) = self.state.get_object_mut(id) {
+                self.physics.end_drag(obj, &objects_clone);
+                self.update_object_transform(id);
+            }
+        }
+    }
+
+    /// Find object at screen center (crosshair position)
+    fn find_object_at_crosshair(&self) -> Option<u64> {
+        // Raycast from screen center (0, 0 in NDC)
+        let ndc_x = 0.0;
+        let ndc_y = 0.0;
+
+        let inv_proj = self.camera.projection_matrix().inverse();
+        let inv_view = self.camera.view_matrix().inverse();
+
+        let ray_clip = glam::Vec4::new(ndc_x, ndc_y, -1.0, 1.0);
+        let ray_eye = inv_proj * ray_clip;
+        let ray_eye = glam::Vec4::new(ray_eye.x, ray_eye.y, -1.0, 0.0);
+        let ray_world = (inv_view * ray_eye).truncate().normalize();
+
+        let ray_origin = self.camera.position;
+        let mut best_id = None;
+        let mut best_dist = f32::MAX;
+
+        for obj in &self.state.objects {
+            let to_obj = obj.position - ray_origin;
+            let t = to_obj.dot(ray_world);
+            if t < 0.0 {
+                continue;
+            }
+
+            let closest = ray_origin + ray_world * t;
+            let dist = (closest - obj.position).length();
+            let radius = obj.collision_radius() * 1.5;
+
+            if dist < radius && t < best_dist {
+                best_dist = t;
+                best_id = Some(obj.id);
+            }
+        }
+
+        best_id
+    }
+
+    /// Try to pick object at crosshair (for pointer lock mode)
+    fn try_pick_object_crosshair(&mut self) {
+        if let Some(id) = self.find_object_at_crosshair() {
+            self.dragging_object_id = Some(id);
+            if let Some(obj) = self.state.get_object_mut(id) {
+                obj.is_dragging = true;
+            }
+        }
     }
 
     /// Find object at cursor position (without starting drag)
@@ -935,6 +1351,40 @@ impl App {
         let (mx, my) = self.mouse_position;
         let ndc_x = (2.0 * mx / self.size.width as f32) - 1.0;
         let ndc_y = 1.0 - (2.0 * my / self.size.height as f32);
+
+        let inv_proj = self.camera.projection_matrix().inverse();
+        let inv_view = self.camera.view_matrix().inverse();
+
+        let ray_clip = glam::Vec4::new(ndc_x, ndc_y, -1.0, 1.0);
+        let ray_eye = inv_proj * ray_clip;
+        let ray_eye = glam::Vec4::new(ray_eye.x, ray_eye.y, -1.0, 0.0);
+        let ray_world = (inv_view * ray_eye).truncate().normalize();
+
+        let desk_y = self.physics.desk_surface_y();
+        let plane_y = desk_y + 0.5;
+
+        if let Some(intersection) = physics::ray_plane_intersection(
+            self.camera.position,
+            ray_world,
+            Vec3::new(0.0, plane_y, 0.0),
+            Vec3::Y,
+        ) {
+            if let Some(id) = self.dragging_object_id {
+                if let Some(obj) = self.state.get_object_mut(id) {
+                    obj.position.x = intersection.x.clamp(-4.5, 4.5);
+                    obj.position.z = intersection.z.clamp(-3.0, 3.0);
+                    obj.position.y = plane_y;
+                    self.update_object_transform(id);
+                }
+            }
+        }
+    }
+
+    /// Update drag position based on crosshair (for pointer lock mode)
+    fn update_drag_crosshair(&mut self) {
+        // Raycast from screen center (0, 0 in NDC)
+        let ndc_x = 0.0;
+        let ndc_y = 0.0;
 
         let inv_proj = self.camera.projection_matrix().inverse();
         let inv_view = self.camera.view_matrix().inverse();
@@ -1053,7 +1503,13 @@ impl App {
             },
         ];
 
-        let indices: Vec<u16> = vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7];
+        // Top face: CCW winding when viewed from above (camera looking down)
+        // v0=back-left, v1=back-right, v2=front-right, v3=front-left
+        // CCW from above: 0->3->2 and 0->2->1 (reversed from CW)
+        // Front face: CCW winding when viewed from front (camera in front)
+        // v4=bottom-front-left, v5=bottom-front-right, v6=top-front-right, v7=top-front-left
+        // CCW from front: 4->7->6 and 4->6->5 (reversed from CW)
+        let indices: Vec<u16> = vec![0, 3, 2, 0, 2, 1, 4, 7, 6, 4, 6, 5];
 
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Desk Vertex Buffer"),
@@ -1101,7 +1557,10 @@ impl App {
             },
         ];
 
-        let indices: Vec<u16> = vec![0, 1, 2, 0, 2, 3];
+        // Floor face: CCW winding when viewed from above
+        // v0=back-left, v1=back-right, v2=front-right, v3=front-left
+        // CCW from above: 0->3->2 and 0->2->1
+        let indices: Vec<u16> = vec![0, 3, 2, 0, 2, 1];
 
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Floor Vertex Buffer"),
@@ -1172,6 +1631,26 @@ impl ApplicationHandler for AppWrapper {
         }
     }
 
+    fn device_event(&mut self, _event_loop: &ActiveEventLoop, _device_id: winit::event::DeviceId, event: winit::event::DeviceEvent) {
+        let Some(app) = &mut self.app else { return };
+
+        // Handle mouse motion for camera rotation in pointer lock mode
+        if let winit::event::DeviceEvent::MouseMotion { delta } = event {
+            if app.ui_state.pointer_locked {
+                // Rotate camera based on mouse delta
+                app.camera.rotate(delta.0 as f32, delta.1 as f32);
+
+                // If dragging an object in pointer lock mode, update its position based on crosshair
+                if app.dragging_object_id.is_some() {
+                    app.update_drag_crosshair();
+                }
+
+                // Update crosshair target
+                app.ui_state.crosshair_target_id = app.find_object_at_crosshair();
+            }
+        }
+    }
+
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         if let Some(app) = &self.app {
             app.window.request_redraw();
@@ -1186,14 +1665,16 @@ fn main() {
 
     info!("Starting Focus Desktop Simulator...");
     info!("Controls:");
+    info!("  Click on scene - Enter FPS mode (crosshair interaction)");
+    info!("  ESC - Exit FPS mode");
+    info!("  Mouse movement (FPS mode) - Look around");
+    info!("  Click (FPS mode) - Pick up object under crosshair");
     info!("  Click Menu button (top-left) - Open object palette");
     info!("  Right-click on object - Open customization panel");
     info!("  Right-click on empty space - Toggle palette");
-    info!("  Click+Drag - Move object");
-    info!("  Scroll - Rotate object");
+    info!("  Scroll - Rotate object (under crosshair or while dragging)");
     info!("  Shift+Scroll - Scale object");
-    info!("  Delete - Delete dragged object");
-    info!("  Escape - Close panels");
+    info!("  Delete - Delete object under crosshair");
     info!("  T - Cycle through object types (keyboard shortcut)");
     info!("  A - Add selected object (keyboard shortcut)");
 
