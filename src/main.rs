@@ -17,7 +17,7 @@ use desk_object::{DeskObject, ObjectType};
 use mesh::{generate_object_mesh, generate_object_mesh_with_state, MeshData, Vertex};
 use physics::PhysicsEngine;
 use state::AppState;
-use ui::{render_left_sidebar, render_right_sidebar, ObjectInfo, UiAction, UiState};
+use ui::{render_left_sidebar, render_right_sidebar, render_crosshair, ObjectInfo, UiAction, UiState};
 
 use egui_wgpu::ScreenDescriptor;
 use glam::{Mat4, Quat, Vec3};
@@ -714,6 +714,10 @@ impl App {
         let egui_input = self.egui_state.take_egui_input(&self.window);
         let egui_ctx = self.egui_ctx.clone();
 
+        // Check if there's an object under the crosshair (for visual feedback)
+        let crosshair_hovering = self.ui_state.crosshair_target_id.is_some();
+        let pointer_locked = self.ui_state.pointer_locked;
+
         let mut ui_actions = Vec::new();
         let egui_output = egui_ctx.run(egui_input, |ctx| {
             // Render left sidebar (palette)
@@ -723,6 +727,9 @@ impl App {
             // Render right sidebar (customization)
             let right_actions = render_right_sidebar(ctx, &mut self.ui_state, object_name.as_deref(), object_info.as_ref());
             ui_actions.extend(right_actions);
+
+            // Render crosshair (only in pointer lock mode)
+            render_crosshair(ctx, pointer_locked, crosshair_hovering);
         });
 
         // Process UI actions after egui rendering
@@ -907,11 +914,29 @@ impl App {
         }
 
         match event {
+            WindowEvent::Focused(focused) => {
+                // Release pointer lock when window loses focus
+                if !focused && self.ui_state.pointer_locked {
+                    self.release_pointer_lock();
+                }
+            }
             WindowEvent::MouseInput { button, state, .. } => {
                 if *button == MouseButton::Left {
                     self.left_mouse_down = *state == ElementState::Pressed;
-                    if !self.left_mouse_down {
-                        // End drag
+
+                    if *state == ElementState::Pressed {
+                        // If not in pointer lock mode, clicking enters it (unless UI is consuming)
+                        if !self.ui_state.pointer_locked && !self.ui_state.left_sidebar_open && !self.ui_state.right_sidebar_open {
+                            self.request_pointer_lock();
+                        } else if self.ui_state.pointer_locked {
+                            // In pointer lock mode, click picks up object under crosshair
+                            self.try_pick_object_crosshair();
+                        } else {
+                            // Not pointer locked but UI might be open, try normal pick
+                            self.try_pick_object();
+                        }
+                    } else {
+                        // Mouse released - end drag
                         if let Some(id) = self.dragging_object_id.take() {
                             let objects_clone: Vec<DeskObject> = self.state.objects.clone();
                             if let Some(obj) = self.state.get_object_mut(id) {
@@ -919,25 +944,45 @@ impl App {
                                 self.update_object_transform(id);
                             }
                         }
-                    } else {
-                        self.try_pick_object();
                     }
                 } else if *button == MouseButton::Right && *state == ElementState::Pressed {
-                    // Right-click to open customization panel for clicked object
-                    if let Some(id) = self.find_object_at_cursor() {
-                        if let Some(obj) = self.state.get_object(id) {
-                            self.ui_state.open_customization(id, obj.color, obj.accent_color);
+                    if self.ui_state.pointer_locked {
+                        // Right-click in pointer lock mode: open customization for crosshair target
+                        if let Some(id) = self.find_object_at_crosshair() {
+                            if let Some(obj) = self.state.get_object(id) {
+                                self.ui_state.open_customization(id, obj.color, obj.accent_color);
+                                // Exit pointer lock when opening customization
+                                self.release_pointer_lock();
+                            }
+                        } else {
+                            // Right-click on empty space toggles the left sidebar
+                            self.release_pointer_lock();
+                            self.ui_state.toggle_left_sidebar();
                         }
                     } else {
-                        // Right-click on empty space toggles the left sidebar
-                        self.ui_state.toggle_left_sidebar();
+                        // Right-click to open customization panel for clicked object
+                        if let Some(id) = self.find_object_at_cursor() {
+                            if let Some(obj) = self.state.get_object(id) {
+                                self.ui_state.open_customization(id, obj.color, obj.accent_color);
+                            }
+                        } else {
+                            // Right-click on empty space toggles the left sidebar
+                            self.ui_state.toggle_left_sidebar();
+                        }
                     }
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse_position = (position.x as f32, position.y as f32);
-                if self.left_mouse_down && self.dragging_object_id.is_some() {
+
+                // In normal mode, update drag based on cursor position
+                if !self.ui_state.pointer_locked && self.left_mouse_down && self.dragging_object_id.is_some() {
                     self.update_drag();
+                }
+
+                // Update crosshair target (what's under the crosshair)
+                if self.ui_state.pointer_locked {
+                    self.ui_state.crosshair_target_id = self.find_object_at_crosshair();
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -945,7 +990,9 @@ impl App {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => *y,
                     winit::event::MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / 50.0,
                 };
+
                 if let Some(id) = self.dragging_object_id {
+                    // When dragging, scroll rotates or scales the object
                     if self.shift_pressed {
                         if let Some(obj) = self.state.get_object_mut(id) {
                             obj.scale = (obj.scale + scroll * 0.1).clamp(0.3, 3.0);
@@ -954,6 +1001,19 @@ impl App {
                     } else if let Some(obj) = self.state.get_object_mut(id) {
                         obj.rotation = Quat::from_rotation_y(scroll * 0.2) * obj.rotation;
                         self.update_object_transform(id);
+                    }
+                } else if self.ui_state.pointer_locked {
+                    // When in pointer lock mode but not dragging, scroll rotates object under crosshair
+                    if let Some(id) = self.ui_state.crosshair_target_id {
+                        if self.shift_pressed {
+                            if let Some(obj) = self.state.get_object_mut(id) {
+                                obj.scale = (obj.scale + scroll * 0.1).clamp(0.3, 3.0);
+                                self.update_object_transform(id);
+                            }
+                        } else if let Some(obj) = self.state.get_object_mut(id) {
+                            obj.rotation = Quat::from_rotation_y(scroll * 0.2) * obj.rotation;
+                            self.update_object_transform(id);
+                        }
                     }
                 }
             }
@@ -984,17 +1044,24 @@ impl App {
                             );
                         }
                         KeyCode::Delete if event.state == ElementState::Pressed => {
-                            // Delete dragged object
-                            if let Some(id) = self.dragging_object_id.take() {
+                            // Delete dragged object or object under crosshair
+                            let id_to_delete = self.dragging_object_id.take()
+                                .or(self.ui_state.crosshair_target_id);
+                            if let Some(id) = id_to_delete {
                                 self.state.remove_object(id);
                                 self.object_meshes.remove(&id);
+                                self.ui_state.crosshair_target_id = None;
                                 info!("Deleted object");
                             }
                         }
                         KeyCode::Escape if event.state == ElementState::Pressed => {
-                            // Close panels
-                            self.ui_state.close_customization();
-                            self.ui_state.left_sidebar_open = false;
+                            // First release pointer lock, then close panels
+                            if self.ui_state.pointer_locked {
+                                self.release_pointer_lock();
+                            } else {
+                                self.ui_state.close_customization();
+                                self.ui_state.left_sidebar_open = false;
+                            }
                         }
                         _ => {}
                     }
@@ -1003,6 +1070,86 @@ impl App {
             _ => {}
         }
         false
+    }
+
+    /// Request pointer lock (FPS mode)
+    fn request_pointer_lock(&mut self) {
+        // Set cursor grab mode to locked and hide cursor
+        if let Err(e) = self.window.set_cursor_grab(winit::window::CursorGrabMode::Locked) {
+            // Fall back to confined if locked isn't supported
+            if let Err(e2) = self.window.set_cursor_grab(winit::window::CursorGrabMode::Confined) {
+                log::warn!("Could not lock cursor: {:?} / {:?}", e, e2);
+                return;
+            }
+        }
+        self.window.set_cursor_visible(false);
+        self.ui_state.pointer_locked = true;
+        info!("Pointer locked - ESC to exit, mouse to look around");
+    }
+
+    /// Release pointer lock
+    fn release_pointer_lock(&mut self) {
+        let _ = self.window.set_cursor_grab(winit::window::CursorGrabMode::None);
+        self.window.set_cursor_visible(true);
+        self.ui_state.pointer_locked = false;
+        self.ui_state.crosshair_target_id = None;
+
+        // Also end any drag in progress
+        if let Some(id) = self.dragging_object_id.take() {
+            let objects_clone: Vec<DeskObject> = self.state.objects.clone();
+            if let Some(obj) = self.state.get_object_mut(id) {
+                self.physics.end_drag(obj, &objects_clone);
+                self.update_object_transform(id);
+            }
+        }
+    }
+
+    /// Find object at screen center (crosshair position)
+    fn find_object_at_crosshair(&self) -> Option<u64> {
+        // Raycast from screen center (0, 0 in NDC)
+        let ndc_x = 0.0;
+        let ndc_y = 0.0;
+
+        let inv_proj = self.camera.projection_matrix().inverse();
+        let inv_view = self.camera.view_matrix().inverse();
+
+        let ray_clip = glam::Vec4::new(ndc_x, ndc_y, -1.0, 1.0);
+        let ray_eye = inv_proj * ray_clip;
+        let ray_eye = glam::Vec4::new(ray_eye.x, ray_eye.y, -1.0, 0.0);
+        let ray_world = (inv_view * ray_eye).truncate().normalize();
+
+        let ray_origin = self.camera.position;
+        let mut best_id = None;
+        let mut best_dist = f32::MAX;
+
+        for obj in &self.state.objects {
+            let to_obj = obj.position - ray_origin;
+            let t = to_obj.dot(ray_world);
+            if t < 0.0 {
+                continue;
+            }
+
+            let closest = ray_origin + ray_world * t;
+            let dist = (closest - obj.position).length();
+            let radius = obj.collision_radius() * 1.5;
+
+            if dist < radius && t < best_dist {
+                best_dist = t;
+                best_id = Some(obj.id);
+            }
+        }
+
+        best_id
+    }
+
+    /// Try to pick object at crosshair (for pointer lock mode)
+    fn try_pick_object_crosshair(&mut self) {
+        if let Some(id) = self.find_object_at_crosshair() {
+            self.dragging_object_id = Some(id);
+            if let Some(obj) = self.state.get_object_mut(id) {
+                obj.is_dragging = true;
+            }
+        }
     }
 
     /// Find object at cursor position (without starting drag)
@@ -1089,6 +1236,40 @@ impl App {
         let (mx, my) = self.mouse_position;
         let ndc_x = (2.0 * mx / self.size.width as f32) - 1.0;
         let ndc_y = 1.0 - (2.0 * my / self.size.height as f32);
+
+        let inv_proj = self.camera.projection_matrix().inverse();
+        let inv_view = self.camera.view_matrix().inverse();
+
+        let ray_clip = glam::Vec4::new(ndc_x, ndc_y, -1.0, 1.0);
+        let ray_eye = inv_proj * ray_clip;
+        let ray_eye = glam::Vec4::new(ray_eye.x, ray_eye.y, -1.0, 0.0);
+        let ray_world = (inv_view * ray_eye).truncate().normalize();
+
+        let desk_y = self.physics.desk_surface_y();
+        let plane_y = desk_y + 0.5;
+
+        if let Some(intersection) = physics::ray_plane_intersection(
+            self.camera.position,
+            ray_world,
+            Vec3::new(0.0, plane_y, 0.0),
+            Vec3::Y,
+        ) {
+            if let Some(id) = self.dragging_object_id {
+                if let Some(obj) = self.state.get_object_mut(id) {
+                    obj.position.x = intersection.x.clamp(-4.5, 4.5);
+                    obj.position.z = intersection.z.clamp(-3.0, 3.0);
+                    obj.position.y = plane_y;
+                    self.update_object_transform(id);
+                }
+            }
+        }
+    }
+
+    /// Update drag position based on crosshair (for pointer lock mode)
+    fn update_drag_crosshair(&mut self) {
+        // Raycast from screen center (0, 0 in NDC)
+        let ndc_x = 0.0;
+        let ndc_y = 0.0;
 
         let inv_proj = self.camera.projection_matrix().inverse();
         let inv_view = self.camera.view_matrix().inverse();
@@ -1207,7 +1388,13 @@ impl App {
             },
         ];
 
-        let indices: Vec<u16> = vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7];
+        // Top face: CCW winding when viewed from above (camera looking down)
+        // v0=back-left, v1=back-right, v2=front-right, v3=front-left
+        // CCW from above: 0->3->2 and 0->2->1 (reversed from CW)
+        // Front face: CCW winding when viewed from front (camera in front)
+        // v4=bottom-front-left, v5=bottom-front-right, v6=top-front-right, v7=top-front-left
+        // CCW from front: 4->7->6 and 4->6->5 (reversed from CW)
+        let indices: Vec<u16> = vec![0, 3, 2, 0, 2, 1, 4, 7, 6, 4, 6, 5];
 
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Desk Vertex Buffer"),
@@ -1255,7 +1442,10 @@ impl App {
             },
         ];
 
-        let indices: Vec<u16> = vec![0, 1, 2, 0, 2, 3];
+        // Floor face: CCW winding when viewed from above
+        // v0=back-left, v1=back-right, v2=front-right, v3=front-left
+        // CCW from above: 0->3->2 and 0->2->1
+        let indices: Vec<u16> = vec![0, 3, 2, 0, 2, 1];
 
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Floor Vertex Buffer"),
@@ -1326,6 +1516,26 @@ impl ApplicationHandler for AppWrapper {
         }
     }
 
+    fn device_event(&mut self, _event_loop: &ActiveEventLoop, _device_id: winit::event::DeviceId, event: winit::event::DeviceEvent) {
+        let Some(app) = &mut self.app else { return };
+
+        // Handle mouse motion for camera rotation in pointer lock mode
+        if let winit::event::DeviceEvent::MouseMotion { delta } = event {
+            if app.ui_state.pointer_locked {
+                // Rotate camera based on mouse delta
+                app.camera.rotate(delta.0 as f32, delta.1 as f32);
+
+                // If dragging an object in pointer lock mode, update its position based on crosshair
+                if app.dragging_object_id.is_some() {
+                    app.update_drag_crosshair();
+                }
+
+                // Update crosshair target
+                app.ui_state.crosshair_target_id = app.find_object_at_crosshair();
+            }
+        }
+    }
+
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         if let Some(app) = &self.app {
             app.window.request_redraw();
@@ -1340,14 +1550,16 @@ fn main() {
 
     info!("Starting Focus Desktop Simulator...");
     info!("Controls:");
+    info!("  Click on scene - Enter FPS mode (crosshair interaction)");
+    info!("  ESC - Exit FPS mode");
+    info!("  Mouse movement (FPS mode) - Look around");
+    info!("  Click (FPS mode) - Pick up object under crosshair");
     info!("  Click Menu button (top-left) - Open object palette");
     info!("  Right-click on object - Open customization panel");
     info!("  Right-click on empty space - Toggle palette");
-    info!("  Click+Drag - Move object");
-    info!("  Scroll - Rotate object");
+    info!("  Scroll - Rotate object (under crosshair or while dragging)");
     info!("  Shift+Scroll - Scale object");
-    info!("  Delete - Delete dragged object");
-    info!("  Escape - Close panels");
+    info!("  Delete - Delete object under crosshair");
     info!("  T - Cycle through object types (keyboard shortcut)");
     info!("  A - Add selected object (keyboard shortcut)");
 

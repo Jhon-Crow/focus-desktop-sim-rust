@@ -96,7 +96,8 @@ pub fn create_cylinder(
         let nx1 = angle1.cos();
         let nz1 = angle1.sin();
 
-        // Side quad
+        // Side quad - CCW when viewed from outside (outward normal)
+        // Order: bottom-left -> top-left -> top-right -> bottom-right
         mesh.add_quad(
             Vertex {
                 position: [x0, y_offset, z0],
@@ -104,8 +105,8 @@ pub fn create_cylinder(
                 color,
             },
             Vertex {
-                position: [x1, y_offset, z1],
-                normal: [nx1, 0.0, nz1],
+                position: [x0, y_offset + height, z0],
+                normal: [nx0, 0.0, nz0],
                 color,
             },
             Vertex {
@@ -114,8 +115,8 @@ pub fn create_cylinder(
                 color,
             },
             Vertex {
-                position: [x0, y_offset + height, z0],
-                normal: [nx0, 0.0, nz0],
+                position: [x1, y_offset, z1],
+                normal: [nx1, 0.0, nz1],
                 color,
             },
         );
@@ -178,7 +179,8 @@ pub fn create_box(
     let hw = width / 2.0;
     let hd = depth / 2.0;
 
-    // Front face (+Z)
+    // Front face (+Z) - CCW when viewed from +Z direction
+    // Order: bottom-left -> top-left -> top-right -> bottom-right
     let front_color = [color[0] * 0.9, color[1] * 0.9, color[2] * 0.9, color[3]];
     mesh.add_quad(
         Vertex {
@@ -187,7 +189,7 @@ pub fn create_box(
             color: front_color,
         },
         Vertex {
-            position: [hw, y_offset, hd],
+            position: [-hw, y_offset + height, hd],
             normal: [0.0, 0.0, 1.0],
             color: front_color,
         },
@@ -197,13 +199,14 @@ pub fn create_box(
             color: front_color,
         },
         Vertex {
-            position: [-hw, y_offset + height, hd],
+            position: [hw, y_offset, hd],
             normal: [0.0, 0.0, 1.0],
             color: front_color,
         },
     );
 
-    // Back face (-Z)
+    // Back face (-Z) - CCW when viewed from -Z direction
+    // Order: bottom-right -> top-right -> top-left -> bottom-left
     let back_color = [color[0] * 0.8, color[1] * 0.8, color[2] * 0.8, color[3]];
     mesh.add_quad(
         Vertex {
@@ -212,7 +215,7 @@ pub fn create_box(
             color: back_color,
         },
         Vertex {
-            position: [-hw, y_offset, -hd],
+            position: [hw, y_offset + height, -hd],
             normal: [0.0, 0.0, -1.0],
             color: back_color,
         },
@@ -222,13 +225,14 @@ pub fn create_box(
             color: back_color,
         },
         Vertex {
-            position: [hw, y_offset + height, -hd],
+            position: [-hw, y_offset, -hd],
             normal: [0.0, 0.0, -1.0],
             color: back_color,
         },
     );
 
-    // Right face (+X)
+    // Right face (+X) - CCW when viewed from +X direction
+    // Order: bottom-front -> top-front -> top-back -> bottom-back
     let right_color = [color[0] * 0.85, color[1] * 0.85, color[2] * 0.85, color[3]];
     mesh.add_quad(
         Vertex {
@@ -237,7 +241,7 @@ pub fn create_box(
             color: right_color,
         },
         Vertex {
-            position: [hw, y_offset, -hd],
+            position: [hw, y_offset + height, hd],
             normal: [1.0, 0.0, 0.0],
             color: right_color,
         },
@@ -247,13 +251,14 @@ pub fn create_box(
             color: right_color,
         },
         Vertex {
-            position: [hw, y_offset + height, hd],
+            position: [hw, y_offset, -hd],
             normal: [1.0, 0.0, 0.0],
             color: right_color,
         },
     );
 
-    // Left face (-X)
+    // Left face (-X) - CCW when viewed from -X direction
+    // Order: bottom-back -> top-back -> top-front -> bottom-front
     let left_color = [color[0] * 0.75, color[1] * 0.75, color[2] * 0.75, color[3]];
     mesh.add_quad(
         Vertex {
@@ -262,7 +267,7 @@ pub fn create_box(
             color: left_color,
         },
         Vertex {
-            position: [-hw, y_offset, hd],
+            position: [-hw, y_offset + height, -hd],
             normal: [-1.0, 0.0, 0.0],
             color: left_color,
         },
@@ -272,13 +277,14 @@ pub fn create_box(
             color: left_color,
         },
         Vertex {
-            position: [-hw, y_offset + height, -hd],
+            position: [-hw, y_offset, hd],
             normal: [-1.0, 0.0, 0.0],
             color: left_color,
         },
     );
 
-    // Top face (+Y)
+    // Top face (+Y) - CCW when viewed from above
+    // Order: front-left -> back-left -> back-right -> front-right
     mesh.add_quad(
         Vertex {
             position: [-hw, y_offset + height, hd],
@@ -286,7 +292,7 @@ pub fn create_box(
             color,
         },
         Vertex {
-            position: [hw, y_offset + height, hd],
+            position: [-hw, y_offset + height, -hd],
             normal: [0.0, 1.0, 0.0],
             color,
         },
@@ -296,13 +302,14 @@ pub fn create_box(
             color,
         },
         Vertex {
-            position: [-hw, y_offset + height, -hd],
+            position: [hw, y_offset + height, hd],
             normal: [0.0, 1.0, 0.0],
             color,
         },
     );
 
-    // Bottom face (-Y)
+    // Bottom face (-Y) - CCW when viewed from below
+    // Order: back-left -> front-left -> front-right -> back-right
     let bottom_color = [color[0] * 0.7, color[1] * 0.7, color[2] * 0.7, color[3]];
     mesh.add_quad(
         Vertex {
@@ -311,7 +318,7 @@ pub fn create_box(
             color: bottom_color,
         },
         Vertex {
-            position: [hw, y_offset, -hd],
+            position: [-hw, y_offset, hd],
             normal: [0.0, -1.0, 0.0],
             color: bottom_color,
         },
@@ -321,7 +328,7 @@ pub fn create_box(
             color: bottom_color,
         },
         Vertex {
-            position: [-hw, y_offset, hd],
+            position: [hw, y_offset, -hd],
             normal: [0.0, -1.0, 0.0],
             color: bottom_color,
         },
@@ -369,6 +376,8 @@ pub fn create_sphere(
             let n01 = [phi1.sin() * theta0.cos(), phi1.cos(), phi1.sin() * theta0.sin()];
             let n11 = [phi1.sin() * theta1.cos(), phi1.cos(), phi1.sin() * theta1.sin()];
 
+            // CCW when viewed from outside (outward normal)
+            // Order: top-left -> bottom-left -> bottom-right -> top-right
             mesh.add_quad(
                 Vertex {
                     position: [x00, y00, z00],
@@ -376,8 +385,8 @@ pub fn create_sphere(
                     color,
                 },
                 Vertex {
-                    position: [x10, y10, z10],
-                    normal: n10,
+                    position: [x01, y01, z01],
+                    normal: n01,
                     color,
                 },
                 Vertex {
@@ -386,8 +395,8 @@ pub fn create_sphere(
                     color,
                 },
                 Vertex {
-                    position: [x01, y01, z01],
-                    normal: n01,
+                    position: [x10, y10, z10],
+                    normal: n10,
                     color,
                 },
             );

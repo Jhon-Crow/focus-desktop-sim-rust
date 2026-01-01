@@ -65,6 +65,10 @@ pub struct UiState {
     pub current_main_color: u32,
     /// Current accent color for selected object
     pub current_accent_color: u32,
+    /// Whether pointer lock is active (FPS mode)
+    pub pointer_locked: bool,
+    /// ID of object currently under crosshair
+    pub crosshair_target_id: Option<u64>,
 }
 
 impl Default for UiState {
@@ -220,6 +224,8 @@ impl UiState {
             selected_object_id: None,
             current_main_color: 0xFFFFFF,
             current_accent_color: 0x1E293B,
+            pointer_locked: false,
+            crosshair_target_id: None,
         }
     }
 
@@ -807,4 +813,77 @@ pub fn hex_to_color32(hex: u32) -> Color32 {
     let g = ((hex >> 8) & 0xFF) as u8;
     let b = (hex & 0xFF) as u8;
     Color32::from_rgb(r, g, b)
+}
+
+/// Render the crosshair at the center of the screen
+/// The crosshair is used for FPS-style object interaction
+pub fn render_crosshair(ctx: &egui::Context, pointer_locked: bool, hovering_object: bool) {
+    // Only show crosshair when pointer is locked (FPS mode)
+    if !pointer_locked {
+        return;
+    }
+
+    let screen_rect = ctx.screen_rect();
+    let center = screen_rect.center();
+
+    // Crosshair properties
+    let size = 12.0;
+    let thickness = 2.0;
+    let gap = 4.0; // Gap in the middle
+
+    // Color based on whether hovering over an object
+    let color = if hovering_object {
+        Color32::from_rgb(79, 70, 229) // Purple when hovering object
+    } else {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 180) // White semi-transparent
+    };
+
+    egui::Area::new(egui::Id::new("crosshair"))
+        .fixed_pos(egui::pos2(0.0, 0.0))
+        .order(egui::Order::Foreground)
+        .interactable(false)
+        .show(ctx, |ui| {
+            let painter = ui.painter();
+
+            // Horizontal line (left part)
+            painter.line_segment(
+                [
+                    egui::pos2(center.x - size, center.y),
+                    egui::pos2(center.x - gap, center.y),
+                ],
+                egui::Stroke::new(thickness, color),
+            );
+
+            // Horizontal line (right part)
+            painter.line_segment(
+                [
+                    egui::pos2(center.x + gap, center.y),
+                    egui::pos2(center.x + size, center.y),
+                ],
+                egui::Stroke::new(thickness, color),
+            );
+
+            // Vertical line (top part)
+            painter.line_segment(
+                [
+                    egui::pos2(center.x, center.y - size),
+                    egui::pos2(center.x, center.y - gap),
+                ],
+                egui::Stroke::new(thickness, color),
+            );
+
+            // Vertical line (bottom part)
+            painter.line_segment(
+                [
+                    egui::pos2(center.x, center.y + gap),
+                    egui::pos2(center.x, center.y + size),
+                ],
+                egui::Stroke::new(thickness, color),
+            );
+
+            // Center dot when hovering
+            if hovering_object {
+                painter.circle_filled(center, 2.0, color);
+            }
+        });
 }
