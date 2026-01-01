@@ -1,0 +1,56 @@
+[package]
+name = "focus-desktop-simulator"
+version = "1.0.0"
+edition = "2021"
+description = "A high-performance desktop simulator - focus tool with isometric 3D desk and interactive objects"
+authors = ["Jhon-Crow"]
+license = "Unlicense"
+repository = "https://github.com/Jhon-Crow/focus-desktop-sim-in-fast-languages"
+keywords = ["focus", "productivity", "desktop", "simulator", "3d", "isometric"]
+categories = ["games", "visualization"]
+
+[dependencies]
+# Window and event handling
+winit = "0.29"
+
+# GPU rendering with wgpu
+wgpu = "0.20"
+
+# Math library for 3D graphics
+glam = { version = "0.29", features = ["serde"] }
+
+# Serialization for state persistence
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# File system operations and paths
+dirs = "6.0"
+
+# Time handling
+chrono = "0.4"
+
+# Async runtime for wgpu
+pollster = "0.4"
+
+# Random number generation
+rand = "0.9"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Image loading for textures
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+# Byte manipulation for GPU buffers
+bytemuck = { version = "1.21", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 1
