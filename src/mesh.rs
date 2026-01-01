@@ -785,6 +785,61 @@ pub fn create_magazine(main_color: u32, accent_color: u32) -> MeshData {
     mesh
 }
 
+/// Create a music player mesh (cassette-style player)
+pub fn create_music_player(main_color: u32, accent_color: u32) -> MeshData {
+    let mut mesh = MeshData::new();
+
+    let (r, g, b) = hex_to_rgb(main_color);
+    let body_color = [r, g, b, 1.0];
+    let (ar, ag, ab) = hex_to_rgb(accent_color);
+    let accent = [ar, ag, ab, 1.0];
+
+    // Main body (cassette player shape)
+    mesh.merge(create_box(0.35, 0.08, 0.22, body_color, 0.0));
+
+    // Speaker grilles (left and right)
+    let grill_color = [r * 0.6, g * 0.6, b * 0.6, 1.0];
+    let mut left_grill = create_box(0.08, 0.01, 0.12, grill_color, 0.08);
+    for v in &mut left_grill.vertices {
+        v.position[0] -= 0.11;
+    }
+    mesh.merge(left_grill);
+
+    let mut right_grill = create_box(0.08, 0.01, 0.12, grill_color, 0.08);
+    for v in &mut right_grill.vertices {
+        v.position[0] += 0.11;
+    }
+    mesh.merge(right_grill);
+
+    // Cassette window (center)
+    let window_color = [0.1, 0.1, 0.15, 1.0];
+    let mut window = create_box(0.1, 0.01, 0.08, window_color, 0.08);
+    for v in &mut window.vertices {
+        v.position[2] -= 0.02;
+    }
+    mesh.merge(window);
+
+    // Play button (small accent-colored box)
+    let mut play_btn = create_box(0.025, 0.015, 0.02, accent, 0.08);
+    for v in &mut play_btn.vertices {
+        v.position[2] += 0.07;
+    }
+    mesh.merge(play_btn);
+
+    // Stop button
+    let mut stop_btn = create_box(0.02, 0.015, 0.02, accent, 0.08);
+    for v in &mut stop_btn.vertices {
+        v.position[0] += 0.04;
+        v.position[2] += 0.07;
+    }
+    mesh.merge(stop_btn);
+
+    // Volume knob
+    mesh.merge(create_cylinder(0.015, 0.02, 8, accent, 0.08, true, true));
+
+    mesh
+}
+
 /// Generate mesh for a given object type
 pub fn generate_object_mesh(object_type: ObjectType, main_color: u32, accent_color: u32) -> MeshData {
     match object_type {
@@ -803,5 +858,6 @@ pub fn generate_object_mesh(object_type: ObjectType, main_color: u32, accent_col
         ObjectType::Metronome => create_metronome(main_color, accent_color),
         ObjectType::Paper => create_paper(main_color, accent_color),
         ObjectType::Magazine => create_magazine(main_color, accent_color),
+        ObjectType::MusicPlayer => create_music_player(main_color, accent_color),
     }
 }

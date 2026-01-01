@@ -17,7 +17,7 @@ use desk_object::{DeskObject, ObjectType};
 use mesh::{generate_object_mesh, MeshData, Vertex};
 use physics::PhysicsEngine;
 use state::AppState;
-use ui::{render_left_sidebar, render_right_sidebar, UiAction, UiState};
+use ui::{render_left_sidebar, render_right_sidebar, ObjectInfo, UiAction, UiState};
 
 use egui_wgpu::ScreenDescriptor;
 use glam::{Mat4, Quat, Vec3};
@@ -472,7 +472,7 @@ impl App {
 
     fn update(&mut self) {
         let now = Instant::now();
-        let _dt = (now - self.last_frame_time).as_secs_f32();
+        let dt = (now - self.last_frame_time).as_secs_f32();
         self.last_frame_time = now;
 
         // Update physics for dropping objects
@@ -490,6 +490,49 @@ impl App {
         }
 
         for id in updated_ids {
+            self.update_object_transform(id);
+        }
+
+        // Update animated objects
+        let mut animation_updates: Vec<(u64, Quat)> = Vec::new();
+        for obj in &mut self.state.objects {
+            match obj.object_type {
+                ObjectType::Globe if obj.state.globe_rotating => {
+                    // Rotate globe around Y axis
+                    obj.state.globe_angle += dt * 0.5; // Rotation speed
+                    if obj.state.globe_angle > std::f32::consts::TAU {
+                        obj.state.globe_angle -= std::f32::consts::TAU;
+                    }
+                    let new_rotation = Quat::from_rotation_y(obj.state.globe_angle);
+                    animation_updates.push((obj.id, new_rotation));
+                }
+                ObjectType::Hourglass if obj.state.hourglass_flipping => {
+                    // Animate hourglass flip (180 degrees around X axis)
+                    obj.state.hourglass_flip_progress += dt * 1.5; // Flip speed
+                    if obj.state.hourglass_flip_progress >= 1.0 {
+                        obj.state.hourglass_flip_progress = 1.0;
+                        obj.state.hourglass_flipping = false;
+                    }
+                    // Smooth ease-in-out animation
+                    let t = obj.state.hourglass_flip_progress;
+                    let eased = if t < 0.5 {
+                        2.0 * t * t
+                    } else {
+                        1.0 - (-2.0 * t + 2.0).powi(2) / 2.0
+                    };
+                    let angle = eased * std::f32::consts::PI;
+                    let new_rotation = Quat::from_rotation_x(angle);
+                    animation_updates.push((obj.id, new_rotation));
+                }
+                _ => {}
+            }
+        }
+
+        // Apply rotation updates
+        for (id, rotation) in animation_updates {
+            if let Some(obj) = self.state.get_object_mut(id) {
+                obj.rotation = rotation;
+            }
             self.update_object_transform(id);
         }
 
@@ -593,10 +636,22 @@ impl App {
 
         // Render egui UI
         // Note: We need to prepare UI data before running egui to avoid borrow issues
-        let object_name = if let Some(id) = self.ui_state.selected_object_id {
-            self.state.get_object(id).map(|obj| obj.object_type.display_name().to_string())
+        let (object_name, object_info) = if let Some(id) = self.ui_state.selected_object_id {
+            self.state.get_object(id).map(|obj| {
+                (
+                    obj.object_type.display_name().to_string(),
+                    ObjectInfo {
+                        object_type: obj.object_type,
+                        lamp_on: obj.state.lamp_on,
+                        globe_rotating: obj.state.globe_rotating,
+                        metronome_running: obj.state.metronome_running,
+                        metronome_bpm: obj.state.metronome_bpm,
+                        music_playing: obj.state.music_playing,
+                    },
+                )
+            }).map_or((None, None), |(name, info)| (Some(name), Some(info)))
         } else {
-            None
+            (None, None)
         };
 
         let egui_input = self.egui_state.take_egui_input(&self.window);
@@ -609,7 +664,7 @@ impl App {
             ui_actions.extend(left_actions);
 
             // Render right sidebar (customization)
-            let right_actions = render_right_sidebar(ctx, &mut self.ui_state, object_name.as_deref());
+            let right_actions = render_right_sidebar(ctx, &mut self.ui_state, object_name.as_deref(), object_info.as_ref());
             ui_actions.extend(right_actions);
         });
 
@@ -706,6 +761,54 @@ impl App {
             UiAction::CloseCustomization => {
                 self.ui_state.close_customization();
             }
+            UiAction::ToggleLamp(id) => {
+                if let Some(obj) = self.state.get_object_mut(id) {
+                    obj.state.lamp_on = !obj.state.lamp_on;
+                    info!("Lamp {} is now {}", id, if obj.state.lamp_on { "ON" } else { "OFF" });
+                    // Rebuild mesh to show light glow effect
+                    let obj_clone = obj.clone();
+                    self.object_meshes.remove(&id);
+                    self.create_object_mesh(&obj_clone);
+                }
+            }
+            UiAction::ToggleGlobeRotation(id) => {
+                if let Some(obj) = self.state.get_object_mut(id) {
+                    obj.state.globe_rotating = !obj.state.globe_rotating;
+                    info!("Globe {} rotation is now {}", id, if obj.state.globe_rotating { "ON" } else { "OFF" });
+                }
+            }
+            UiAction::FlipHourglass(id) => {
+                if let Some(obj) = self.state.get_object_mut(id) {
+                    if !obj.state.hourglass_flipping {
+                        obj.state.hourglass_flipping = true;
+                        obj.state.hourglass_flip_progress = 0.0;
+                        info!("Flipping hourglass {}", id);
+                    }
+                }
+            }
+            UiAction::ToggleMetronome(id) => {
+                if let Some(obj) = self.state.get_object_mut(id) {
+                    obj.state.metronome_running = !obj.state.metronome_running;
+                    info!("Metronome {} is now {}", id, if obj.state.metronome_running { "running" } else { "stopped" });
+                }
+            }
+            UiAction::ChangeMetronomeBpm(id, bpm) => {
+                if let Some(obj) = self.state.get_object_mut(id) {
+                    obj.state.metronome_bpm = bpm;
+                    info!("Metronome {} BPM changed to {}", id, bpm);
+                }
+            }
+            UiAction::ToggleMusicPlayer(id) => {
+                if let Some(obj) = self.state.get_object_mut(id) {
+                    obj.state.music_playing = !obj.state.music_playing;
+                    info!("Music player {} is now {}", id, if obj.state.music_playing { "playing" } else { "stopped" });
+                }
+            }
+            UiAction::SelectPhoto(id) => {
+                // Photo selection would normally open a file dialog
+                // For now, we just log the action
+                info!("Photo selection requested for frame {}", id);
+            }
             UiAction::None => {}
         }
     }
@@ -779,23 +882,7 @@ impl App {
                         }
                         KeyCode::KeyA if event.state == ElementState::Pressed => {
                             // Add object of current type
-                            let object_types = [
-                                ObjectType::Clock,
-                                ObjectType::Lamp,
-                                ObjectType::Plant,
-                                ObjectType::Coffee,
-                                ObjectType::Laptop,
-                                ObjectType::Notebook,
-                                ObjectType::PenHolder,
-                                ObjectType::Books,
-                                ObjectType::PhotoFrame,
-                                ObjectType::Globe,
-                                ObjectType::Trophy,
-                                ObjectType::Hourglass,
-                                ObjectType::Metronome,
-                                ObjectType::Paper,
-                                ObjectType::Magazine,
-                            ];
+                            let object_types = ObjectType::all();
                             let obj_type = object_types[self.current_object_type_index];
                             self.add_object(obj_type);
                             info!(
@@ -805,25 +892,9 @@ impl App {
                         }
                         KeyCode::KeyT if event.state == ElementState::Pressed => {
                             // Cycle through object types
+                            let object_types = ObjectType::all();
                             self.current_object_type_index =
-                                (self.current_object_type_index + 1) % 15;
-                            let object_types = [
-                                ObjectType::Clock,
-                                ObjectType::Lamp,
-                                ObjectType::Plant,
-                                ObjectType::Coffee,
-                                ObjectType::Laptop,
-                                ObjectType::Notebook,
-                                ObjectType::PenHolder,
-                                ObjectType::Books,
-                                ObjectType::PhotoFrame,
-                                ObjectType::Globe,
-                                ObjectType::Trophy,
-                                ObjectType::Hourglass,
-                                ObjectType::Metronome,
-                                ObjectType::Paper,
-                                ObjectType::Magazine,
-                            ];
+                                (self.current_object_type_index + 1) % object_types.len();
                             info!(
                                 "Selected: {} (Press A to add)",
                                 object_types[self.current_object_type_index].display_name()

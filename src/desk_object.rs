@@ -25,6 +25,63 @@ pub enum ObjectType {
     Metronome,
     Paper,
     Magazine,
+    MusicPlayer,
+}
+
+/// Object-specific interactive state
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ObjectState {
+    /// Lamp: Whether the light is on
+    #[serde(default)]
+    pub lamp_on: bool,
+
+    /// Globe: Whether the globe is rotating
+    #[serde(default)]
+    pub globe_rotating: bool,
+
+    /// Globe: Current rotation angle in radians
+    #[serde(default)]
+    pub globe_angle: f32,
+
+    /// Hourglass: Whether currently flipping
+    #[serde(default)]
+    pub hourglass_flipping: bool,
+
+    /// Hourglass: Flip animation progress (0.0 to 1.0)
+    #[serde(default)]
+    pub hourglass_flip_progress: f32,
+
+    /// Photo Frame: Path to the photo file (optional)
+    #[serde(default)]
+    pub photo_path: Option<String>,
+
+    /// Music Player: Whether playing
+    #[serde(default)]
+    pub music_playing: bool,
+
+    /// Music Player: Path to music folder/file
+    #[serde(default)]
+    pub music_path: Option<String>,
+
+    /// Music Player: Volume (0.0 to 1.0)
+    #[serde(default = "default_volume")]
+    pub music_volume: f32,
+
+    /// Metronome: Whether running
+    #[serde(default)]
+    pub metronome_running: bool,
+
+    /// Metronome: Beats per minute
+    #[serde(default = "default_bpm")]
+    pub metronome_bpm: u32,
+}
+
+fn default_volume() -> f32 {
+    0.5
+}
+
+fn default_bpm() -> u32 {
+    120
 }
 
 impl ObjectType {
@@ -46,6 +103,7 @@ impl ObjectType {
             ObjectType::Metronome => "Metronome",
             ObjectType::Paper => "Paper",
             ObjectType::Magazine => "Magazine",
+            ObjectType::MusicPlayer => "Music Player",
         }
     }
 
@@ -67,6 +125,7 @@ impl ObjectType {
             ObjectType::Metronome => "\u{1F3B5}", // Musical note
             ObjectType::Paper => "\u{1F4C4}", // Page
             ObjectType::Magazine => "\u{1F4F0}", // Newspaper
+            ObjectType::MusicPlayer => "\u{1F3B6}", // Musical notes
         }
     }
 
@@ -88,6 +147,7 @@ impl ObjectType {
             ObjectType::Metronome => 0x78350f,
             ObjectType::Paper => 0xffffff,
             ObjectType::Magazine => 0xef4444,
+            ObjectType::MusicPlayer => 0x1e293b,
         }
     }
 
@@ -109,6 +169,7 @@ impl ObjectType {
             ObjectType::Metronome => 0xfbbf24,
             ObjectType::Paper => 0x000000,
             ObjectType::Magazine => 0xffffff,
+            ObjectType::MusicPlayer => 0x22c55e,
         }
     }
 
@@ -235,6 +296,14 @@ impl ObjectType {
                 friction: 0.65,
                 no_stacking_on_top: false,
             },
+            ObjectType::MusicPlayer => ObjectPhysics {
+                weight: 0.8,
+                stability: 0.85,
+                height: 0.15,
+                base_offset: 0.0,
+                friction: 0.55,
+                no_stacking_on_top: false,
+            },
         }
     }
 
@@ -256,7 +325,22 @@ impl ObjectType {
             ObjectType::Metronome,
             ObjectType::Paper,
             ObjectType::Magazine,
+            ObjectType::MusicPlayer,
         ]
+    }
+
+    /// Check if this object type has interactive features
+    pub fn is_interactive(&self) -> bool {
+        matches!(
+            self,
+            ObjectType::Clock
+                | ObjectType::Lamp
+                | ObjectType::Globe
+                | ObjectType::Hourglass
+                | ObjectType::PhotoFrame
+                | ObjectType::Metronome
+                | ObjectType::MusicPlayer
+        )
     }
 }
 
@@ -307,6 +391,9 @@ pub struct DeskObject {
     /// Custom collision height multiplier (1.0 = default)
     #[serde(default = "default_multiplier")]
     pub collision_height_multiplier: f32,
+    /// Object-specific interactive state
+    #[serde(default)]
+    pub state: ObjectState,
     /// Whether the object is currently being dragged
     #[serde(skip)]
     pub is_dragging: bool,
@@ -363,6 +450,7 @@ impl DeskObject {
             accent_color: object_type.default_accent_color(),
             collision_radius_multiplier: 1.0,
             collision_height_multiplier: 1.0,
+            state: ObjectState::default(),
             is_dragging: false,
             target_y: y,
             original_y: y,
@@ -380,7 +468,7 @@ impl DeskObject {
 
     /// Get the collision radius for this object
     pub fn collision_radius(&self) -> f32 {
-        let physics = self.object_type.physics();
+        let _physics = self.object_type.physics();
         // Base radius based on object type, scaled
         let base_radius = match self.object_type {
             ObjectType::Lamp => 0.3,
@@ -391,6 +479,7 @@ impl DeskObject {
             ObjectType::Books => 0.3,
             ObjectType::Globe => 0.25,
             ObjectType::Trophy => 0.2,
+            ObjectType::MusicPlayer => 0.25,
             _ => 0.2,
         };
         base_radius * self.scale * self.collision_radius_multiplier
