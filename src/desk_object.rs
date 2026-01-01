@@ -6,9 +6,10 @@ use glam::{Vec3, Quat};
 use serde::{Deserialize, Serialize};
 
 /// Type of desk object
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ObjectType {
+    #[default]
     Clock,
     Lamp,
     Plant,
@@ -280,24 +281,31 @@ pub struct ObjectPhysics {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeskObject {
     /// Unique identifier
+    #[serde(default = "default_id")]
     pub id: u64,
     /// Type of object
+    #[serde(default)]
     pub object_type: ObjectType,
     /// Position in world space
-    #[serde(with = "vec3_serde")]
+    #[serde(with = "vec3_serde", default = "default_position")]
     pub position: Vec3,
     /// Rotation as quaternion
-    #[serde(with = "quat_serde")]
+    #[serde(with = "quat_serde", default = "default_rotation")]
     pub rotation: Quat,
     /// Scale factor
+    #[serde(default = "default_scale")]
     pub scale: f32,
     /// Main color (hex RGB)
+    #[serde(default = "default_color")]
     pub color: u32,
     /// Accent color (hex RGB)
+    #[serde(default = "default_accent_color")]
     pub accent_color: u32,
     /// Custom collision radius multiplier (1.0 = default)
+    #[serde(default = "default_multiplier")]
     pub collision_radius_multiplier: f32,
     /// Custom collision height multiplier (1.0 = default)
+    #[serde(default = "default_multiplier")]
     pub collision_height_multiplier: f32,
     /// Whether the object is currently being dragged
     #[serde(skip)]
@@ -308,6 +316,35 @@ pub struct DeskObject {
     /// Original Y position (on desk surface)
     #[serde(skip)]
     pub original_y: f32,
+}
+
+// Default value functions for serde
+fn default_id() -> u64 {
+    1
+}
+
+fn default_position() -> Vec3 {
+    Vec3::ZERO
+}
+
+fn default_rotation() -> Quat {
+    Quat::IDENTITY
+}
+
+fn default_scale() -> f32 {
+    1.0
+}
+
+fn default_color() -> u32 {
+    0x808080
+}
+
+fn default_accent_color() -> u32 {
+    0x404040
+}
+
+fn default_multiplier() -> f32 {
+    1.0
 }
 
 impl DeskObject {
